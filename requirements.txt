@@ -1,0 +1,10 @@
+# Analyzer Dependencies (Python CLI tool — run once per movie)
+ffmpeg-python
+openai-whisper
+torch
+transformers
+torchvision
+accelerate
+diffusers
+safety-checker
+Pillow

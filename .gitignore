@@ -1,0 +1,35 @@
+# Virtual environment
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# ML models (can be large, download on first run)
+*.bin
+*.pt
+*.safetensors
+
+# Generated files
+frames/
+*.ts
+*_branch.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Media (add specific paths if needed)
+filler/
+*.mp4
+*.mkv
+*.avi
+
+# Logs
+*.log

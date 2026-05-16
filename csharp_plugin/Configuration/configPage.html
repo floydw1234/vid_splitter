@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Smart Branching Configuration</title>
+</head>
+<body>
+    <div id="mainContent">
+        <h1>Smart Branching</h1>
+        <p>Configure how mature content is handled for different user profiles.</p>
+
+        <form class="formPopup">
+            <div class="blockContent">
+                <div class="verticalSection verticalSection-extrabottompadding">
+                    <h3 class="headingKey cardHeading">General Settings</h3>
+                    <div class="editorFieldSet">
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="enableSmartBranching">
+                                Enable Smart Branching
+                            </label>
+                            <input is="emby-checkbox" id="enableSmartBranching" type="checkbox" />
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="defaultProfile">
+                                Default Profile (unknown users)
+                            </label>
+                            <select is="emby-select" id="defaultProfile" class="emby-select-withcolor emby-select">
+                                <option value="child">Child (Age 10)</option>
+                                <option value="teen_m">Teen Male (Age 15)</option>
+                                <option value="teen_f">Teen Female (Age 15)</option>
+                                <option value="adult" selected>Adult (Age 18)</option>
+                            </select>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="nsfwThreshold">
+                                NSFW Confidence Threshold
+                            </label>
+                            <input is="emby-input" id="nsfwThreshold" type="number" min="0" max="1" step="0.1" value="0.6" />
+                            <div class="fieldDescription">Minimum confidence to flag a frame as NSFW</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="verticalSection verticalSection-extrabottompadding">
+                    <h3 class="headingKey cardHeading">Filler Settings</h3>
+                    <div class="editorFieldSet">
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="fillerDirectory">
+                                Filler Video Directory
+                            </label>
+                            <input is="emby-input" id="fillerDirectory" type="text" value="smart_branching/filler" />
+                            <div class="fieldDescription">Directory containing filler .ts files for swapping mature content</div>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="defaultAction">
+                                Default Mature Content Action
+                            </label>
+                            <select is="emby-select" id="defaultAction" class="emby-select-withcolor emby-select">
+                                <option value="swap">Swap with filler</option>
+                                <option value="skip">Skip segment</option>
+                                <option value="blur">Blur (future)</option>
+                                <option value="mute">Mute audio (future)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="verticalSection verticalSection-extrabottompadding">
+                    <h3 class="headingKey cardHeading">Profile Filter Overrides</h3>
+                    <div class="editorFieldSet">
+                        <p>Configure which content types each profile filters.</p>
+                        <details>
+                            <summary>Child Profile</summary>
+                            <div class="checkboxList paperList" style="padding: 0.5em;">
+                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
+                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="child" data-filter="nudity" checked />
+                                    <span>Nudity</span>
+                                </label>
+                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
+                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="child" data-filter="violence" checked />
+                                    <span>Violence</span>
+                                </label>
+                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
+                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="child" data-filter="language" checked />
+                                    <span>Language</span>
+                                </label>
+                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
+                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="child" data-filter="fear" checked />
+                                    <span>Fear/Intense</span>
+                                </label>
+                            </div>
+                        </details>
+                        <details>
+                            <summary>Teen Profile</summary>
+                            <div class="checkboxList paperList" style="padding: 0.5em;">
+                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
+                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="teen" data-filter="nudity" checked />
+                                    <span>Nudity</span>
+                                </label>
+                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
+                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="teen" data-filter="violence" />
+                                    <span>Violence</span>
+                                </label>
+                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
+                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="teen" data-filter="language" />
+                                    <span>Language</span>
+                                </label>
+                            </div>
+                        </details>
+                    </div>
+                </div>
+            </div>
+
+            <button is="emby-button" type="submit" class="raised button-submit block btnSave raisedIcon">
+                <span>Save</span>
+                <span class="buttonText button-icon-left icon-save material-icons save" style="color: white;"></span>
+            </button>
+        </form>
+    </div>
+
+    <script type="text/javascript">
+        (function () {
+            'use strict';
+
+            var self = {
+                pluginId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+            };
+
+            self.save = function () {
+                var config = {
+                    Enabled: document.getElementById('enableSmartBranching').checked,
+                    DefaultProfile: document.getElementById('defaultProfile').value,
+                    NsfwThreshold: parseFloat(document.getElementById('nsfwThreshold').value),
+                    FillerDirectory: document.getElementById('fillerDirectory').value,
+                    DefaultAction: document.getElementById('defaultAction').value
+                };
+
+                ApiClient.getPluginConfiguration(self.pluginId).then(function (savedConfig) {
+                    // Merge with saved config
+                    var merged = Object.assign(savedConfig, config);
+                    ApiClient.updatePluginConfiguration(self.pluginId, merged).then(function (result) {
+                        Dashboard.alert('Configuration saved');
+                    });
+                });
+            };
+
+            self.load = function (config) {
+                document.getElementById('enableSmartBranching').checked = config.Enabled !== false;
+                document.getElementById('defaultProfile').value = config.DefaultProfile || 'adult';
+                document.getElementById('nsfwThreshold').value = config.NsfwThreshold || 0.6;
+                document.getElementById('fillerDirectory').value = config.FillerDirectory || 'smart_branching/filler';
+                document.getElementById('defaultAction').value = config.DefaultAction || 'swap';
+            };
+
+            document.querySelector('.formPopup').addEventListener('submit', function (e) {
+                e.preventDefault();
+                self.save();
+            });
+
+            // Load config on page show
+            document.addEventListener('viewbeforeshow', function () {
+                ApiClient.getPluginConfiguration(self.pluginId).then(self.load);
+            });
+        })();
+    </script>
+</body>
+</html>
