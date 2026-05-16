@@ -69,47 +69,30 @@
                 </div>
 
                 <div class="verticalSection verticalSection-extrabottompadding">
-                    <h3 class="headingKey cardHeading">Profile Filter Overrides</h3>
+                    <h3 class="headingKey cardHeading">User Profiles</h3>
                     <div class="editorFieldSet">
-                        <p>Configure which content types each profile filters.</p>
-                        <details>
-                            <summary>Child Profile</summary>
-                            <div class="checkboxList paperList" style="padding: 0.5em;">
-                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
-                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="child" data-filter="nudity" checked />
-                                    <span>Nudity</span>
-                                </label>
-                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
-                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="child" data-filter="violence" checked />
-                                    <span>Violence</span>
-                                </label>
-                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
-                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="child" data-filter="language" checked />
-                                    <span>Language</span>
-                                </label>
-                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
-                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="child" data-filter="fear" checked />
-                                    <span>Fear/Intense</span>
-                                </label>
-                            </div>
-                        </details>
-                        <details>
-                            <summary>Teen Profile</summary>
-                            <div class="checkboxList paperList" style="padding: 0.5em;">
-                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
-                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="teen" data-filter="nudity" checked />
-                                    <span>Nudity</span>
-                                </label>
-                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
-                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="teen" data-filter="violence" />
-                                    <span>Violence</span>
-                                </label>
-                                <label class="checkboxLabel inputLabel inputLabelUnfocused">
-                                    <input is="emby-checkbox" type="checkbox" class="chkFilter" data-profile="teen" data-filter="language" />
-                                    <span>Language</span>
-                                </label>
-                            </div>
-                        </details>
+                        <p>
+                            Set each user's birthday and sex so the plugin can automatically resolve
+                            the correct content profile. Optionally override the resolved profile directly.
+                        </p>
+                        <table class="tblApiKeys detailTable" style="width:100%">
+                            <thead>
+                                <tr>
+                                    <th>User</th>
+                                    <th>Birthday</th>
+                                    <th>Sex</th>
+                                    <th>Override</th>
+                                    <th>Resolved Profile</th>
+                                </tr>
+                            </thead>
+                            <tbody id="userProfileTableBody">
+                                <tr>
+                                    <td colspan="5" style="text-align:center; padding: 1em;">
+                                        Loading users...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -129,30 +112,121 @@
                 pluginId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
             };
 
-            self.save = function () {
-                var config = {
-                    Enabled: document.getElementById('enableSmartBranching').checked,
-                    DefaultProfile: document.getElementById('defaultProfile').value,
-                    NsfwThreshold: parseFloat(document.getElementById('nsfwThreshold').value),
-                    FillerDirectory: document.getElementById('fillerDirectory').value,
-                    DefaultAction: document.getElementById('defaultAction').value
-                };
+            // Mirrors ProfileResolver.ResolveFromAgeSex logic
+            function resolveProfile(birthday, sex, override) {
+                if (override && override !== '') return override;
+                if (!birthday) return '—';
+                var dob = new Date(birthday);
+                var today = new Date();
+                var age = today.getFullYear() - dob.getFullYear();
+                var m = today.getMonth() - dob.getMonth();
+                if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+                if (age < 13) return 'child';
+                if (age < 18) return sex === 'female' ? 'teen_f' : 'teen_m';
+                return 'adult';
+            }
 
+            function profileBadgeStyle(profile) {
+                var colors = {
+                    child: '#4caf50',
+                    teen_m: '#2196f3',
+                    teen_f: '#e91e63',
+                    adult: '#9e9e9e'
+                };
+                var c = colors[profile] || '#9e9e9e';
+                return 'display:inline-block;padding:2px 8px;border-radius:3px;background:' + c + ';color:#fff;font-size:0.85em;';
+            }
+
+            function updateResolvedCell(row) {
+                var birthday = row.querySelector('.userBirthday').value;
+                var sex      = row.querySelector('.userSex').value;
+                var override = row.querySelector('.userOverride').value;
+                var profile  = resolveProfile(birthday, sex, override);
+                var cell     = row.querySelector('.resolvedProfile');
+                cell.innerHTML = '<span style="' + profileBadgeStyle(profile) + '">' + profile + '</span>';
+            }
+
+            function buildUserRow(user, stored) {
+                stored = stored || {};
+                var tr = document.createElement('tr');
+                tr.dataset.userId = user.Id;
+                tr.innerHTML = [
+                    '<td style="font-weight:500">' + user.Name + '</td>',
+                    '<td><input type="date" class="emby-input userBirthday" value="' + (stored.Birthday || '') + '" style="width:140px" /></td>',
+                    '<td>',
+                    '  <select class="emby-select userSex" style="width:100px">',
+                    '    <option value="unset"' + (stored.Sex === 'unset' || !stored.Sex ? ' selected' : '') + '>Not set</option>',
+                    '    <option value="male"'   + (stored.Sex === 'male'   ? ' selected' : '') + '>Male</option>',
+                    '    <option value="female"' + (stored.Sex === 'female' ? ' selected' : '') + '>Female</option>',
+                    '  </select>',
+                    '</td>',
+                    '<td>',
+                    '  <select class="emby-select userOverride" style="width:110px">',
+                    '    <option value=""'        + (!stored.ProfileOverride ? ' selected' : '') + '>Auto</option>',
+                    '    <option value="child"'   + (stored.ProfileOverride === 'child'   ? ' selected' : '') + '>Child</option>',
+                    '    <option value="teen_m"'  + (stored.ProfileOverride === 'teen_m'  ? ' selected' : '') + '>Teen (M)</option>',
+                    '    <option value="teen_f"'  + (stored.ProfileOverride === 'teen_f'  ? ' selected' : '') + '>Teen (F)</option>',
+                    '    <option value="adult"'   + (stored.ProfileOverride === 'adult'   ? ' selected' : '') + '>Adult</option>',
+                    '  </select>',
+                    '</td>',
+                    '<td class="resolvedProfile"></td>',
+                ].join('');
+
+                tr.querySelector('.userBirthday').addEventListener('change', function () { updateResolvedCell(tr); });
+                tr.querySelector('.userSex').addEventListener('change',      function () { updateResolvedCell(tr); });
+                tr.querySelector('.userOverride').addEventListener('change', function () { updateResolvedCell(tr); });
+
+                updateResolvedCell(tr);
+                return tr;
+            }
+
+            self.loadUsers = function (savedConfig) {
+                ApiClient.getUsers().then(function (users) {
+                    var tbody = document.getElementById('userProfileTableBody');
+                    tbody.innerHTML = '';
+                    var stored = savedConfig.UserProfiles || {};
+                    users.forEach(function (user) {
+                        tbody.appendChild(buildUserRow(user, stored[user.Id]));
+                    });
+                });
+            };
+
+            self.save = function () {
                 ApiClient.getPluginConfiguration(self.pluginId).then(function (savedConfig) {
-                    // Merge with saved config
-                    var merged = Object.assign(savedConfig, config);
-                    ApiClient.updatePluginConfiguration(self.pluginId, merged).then(function (result) {
+                    savedConfig.Enabled         = document.getElementById('enableSmartBranching').checked;
+                    savedConfig.DefaultProfile  = document.getElementById('defaultProfile').value;
+                    savedConfig.NsfwThreshold   = parseFloat(document.getElementById('nsfwThreshold').value);
+                    savedConfig.FillerDirectory = document.getElementById('fillerDirectory').value;
+                    savedConfig.DefaultAction   = document.getElementById('defaultAction').value;
+
+                    // Collect per-user profile data from the table
+                    var userProfiles = {};
+                    document.querySelectorAll('#userProfileTableBody tr[data-user-id]').forEach(function (row) {
+                        var uid      = row.dataset.userId;
+                        var birthday = row.querySelector('.userBirthday').value;
+                        var sex      = row.querySelector('.userSex').value;
+                        var override = row.querySelector('.userOverride').value;
+                        userProfiles[uid] = {
+                            Birthday:        birthday || null,
+                            Sex:             sex,
+                            ProfileOverride: override || null
+                        };
+                    });
+                    savedConfig.UserProfiles = userProfiles;
+
+                    ApiClient.updatePluginConfiguration(self.pluginId, savedConfig).then(function () {
                         Dashboard.alert('Configuration saved');
                     });
                 });
             };
 
             self.load = function (config) {
-                document.getElementById('enableSmartBranching').checked = config.Enabled !== false;
-                document.getElementById('defaultProfile').value = config.DefaultProfile || 'adult';
-                document.getElementById('nsfwThreshold').value = config.NsfwThreshold || 0.6;
-                document.getElementById('fillerDirectory').value = config.FillerDirectory || 'smart_branching/filler';
-                document.getElementById('defaultAction').value = config.DefaultAction || 'swap';
+                document.getElementById('enableSmartBranching').checked    = config.Enabled !== false;
+                document.getElementById('defaultProfile').value            = config.DefaultProfile || 'adult';
+                document.getElementById('nsfwThreshold').value             = config.NsfwThreshold || 0.6;
+                document.getElementById('fillerDirectory').value           = config.FillerDirectory || 'smart_branching/filler';
+                document.getElementById('defaultAction').value             = config.DefaultAction || 'swap';
+                self.loadUsers(config);
             };
 
             document.querySelector('.formPopup').addEventListener('submit', function (e) {
@@ -160,7 +234,6 @@
                 self.save();
             });
 
-            // Load config on page show
             document.addEventListener('viewbeforeshow', function () {
                 ApiClient.getPluginConfiguration(self.pluginId).then(self.load);
             });

@@ -1,37 +1,76 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using Jellyfin.Data.Enums;
+using Jellyfin.Plugin.SmartBranching.Configuration;
 using Jellyfin.Plugin.SmartBranching.Models;
-using MediaBrowser.Controller.Dto;
-using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Entities.Movies;
-using MediaBrowser.Controller.Library;
-using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Dto;
 
 namespace Jellyfin.Plugin.SmartBranching;
 
 /// <summary>
 /// Maps Jellyfin users to branch profiles and resolves segment actions.
+/// Profile data (birthday, sex) is read from the plugin's stored configuration.
 /// </summary>
 public class ProfileResolver
 {
     /// <summary>
     /// Maps a Jellyfin user to a branch profile key.
-    /// 
-    /// Strategy:
-    /// - Check user settings for a custom "branch_profile" tag
-    /// - Fall back to parental rating ceiling from the user's policy
-    /// - Default to "adult" if nothing matches
+    ///
+    /// Resolution order:
+    ///   1. Explicit ProfileOverride stored in plugin config for this user
+    ///   2. Auto-resolved from stored Birthday + Sex
+    ///   3. Plugin's DefaultProfile setting
     /// </summary>
     public string ResolveProfile(UserDto user, BranchManifest manifest)
     {
-        // 1. Check for explicit profile override in user metadata
-        var explicitProfile = GetExplicitProfile(user);
-        if (explicitProfile != null && manifest.Profiles.ContainsKey(explicitProfile))
-            return explicitProfile;
+        var config = Plugin.Instance?.Configuration;
+        var userId = user.Id.ToString();
 
-        // 2. Infer from the account's maximum parental rating
-        return GetProfileFromParentalRating(user);
+        if (config?.UserProfiles != null &&
+            config.UserProfiles.TryGetValue(userId, out var stored))
+        {
+            // 1. Explicit override wins
+            if (!string.IsNullOrEmpty(stored.ProfileOverride) &&
+                manifest.Profiles.ContainsKey(stored.ProfileOverride))
+                return stored.ProfileOverride;
+
+            // 2. Auto-resolve from birthday + sex
+            if (!string.IsNullOrEmpty(stored.Birthday) &&
+                DateOnly.TryParse(stored.Birthday, out var dob))
+            {
+                var age = CalculateAge(dob);
+                return ResolveFromAgeSex(age, stored.Sex ?? "unset");
+            }
+        }
+
+        // 3. Fall back to the plugin's default profile
+        return config?.DefaultProfile ?? "adult";
+    }
+
+    /// <summary>
+    /// Resolves a profile key from age and sex.
+    /// </summary>
+    public static string ResolveFromAgeSex(int age, string sex)
+    {
+        if (age < 13)
+            return "child";
+
+        if (age < 18)
+            return sex == "female" ? "teen_f" : "teen_m";
+
+        return "adult";
+    }
+
+    /// <summary>
+    /// Calculates age in whole years from a date of birth.
+    /// </summary>
+    public static int CalculateAge(DateOnly dob)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var age = today.Year - dob.Year;
+        if (today < dob.AddYears(age))
+            age--;
+        return age;
     }
 
     /// <summary>
@@ -111,41 +150,6 @@ public class ProfileResolver
             "adult" => new List<string>(),
             _ => new List<string>()
         };
-    }
-
-    /// <summary>
-    /// Gets the explicit profile from user metadata.
-    /// </summary>
-    private static string? GetExplicitProfile(UserDto user)
-    {
-        // Check user settings for a custom branch profile
-        // This would be set via the plugin's config page
-        if (user.Settings != null && user.Settings.ContainsKey("branch_profile"))
-        {
-            return user.Settings["branch_profile"] as string;
-        }
-        return null;
-    }
-
-    /// <summary>
-    /// Infers a branch profile from the account's MaxParentalRating policy.
-    /// Jellyfin's rating scale: G≈1, PG≈5, PG-13≈7, R≈9, null=unrestricted.
-    /// A low ceiling indicates a child/family account; mid-range indicates teen.
-    /// </summary>
-    private static string GetProfileFromParentalRating(UserDto user)
-    {
-        var rating = user.Policy?.MaxParentalRating;
-
-        if (rating == null)
-            return "adult"; // no restriction — treat as adult
-
-        if (rating <= 5)
-            return "child"; // G or PG ceiling
-
-        if (rating <= 7)
-            return "teen_m"; // PG-13 ceiling
-
-        return "adult";
     }
 
     /// <summary>
