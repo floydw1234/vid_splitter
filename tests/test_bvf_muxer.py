@@ -38,6 +38,7 @@ from vid_splitter.bvf_muxer import (
     _build_index_entry,
     _build_manifest_json,
     _build_packet,
+    _build_segment_block,
     _build_stub_segment_block,
     _compress_manifest,
     _pad_segment_id,
@@ -801,3 +802,276 @@ class TestErrorCases:
     def test_bad_action_direct(self):
         with pytest.raises(ValueError, match="Unknown action"):
             _action_to_int("destroy")
+
+
+# --- _build_segment_block ---
+
+class TestBuildSegmentBlock:
+    def test_block_header_present(self):
+        block = _build_segment_block(
+            "seg_001",
+            [{"pts_ms": 0, "data": b"\x00\x01\x02\x03"}],
+            [{"pts_ms": 0, "data": b"\x10\x11"}],
+            CODEC_H264,
+            CODEC_AAC_LC,
+        )
+        magic = struct.unpack("<4s", block[:4])[0]
+        assert magic == BLOCK_MAGIC
+        # video packet: 16 header + 4 data = 20; audio packet: 16 header + 2 data = 18
+        assert len(block) == BLOCK_HEADER_SIZE + 20 + 18
+
+    def test_video_packets_included(self):
+        block = _build_segment_block(
+            "seg_001",
+            [{"pts_ms": 1000, "data": b"\xde\xad"}],
+            [{"pts_ms": 0, "data": b"\x00"}],
+            CODEC_H264,
+            CODEC_AAC_LC,
+        )
+        # After header, find video packet type (0x01 << 24 = 0x01000000)
+        video_start = BLOCK_HEADER_SIZE
+        ptype = struct.unpack("<I", block[video_start:video_start+4])[0]
+        assert ptype == 0x01000000
+
+    def test_audio_packets_included(self):
+        block = _build_segment_block(
+            "seg_001",
+            [{"pts_ms": 0, "data": b"\x00"}],
+            [{"pts_ms": 2000, "data": b"\xbe\xef"}],
+            CODEC_H264,
+            CODEC_AAC_LC,
+        )
+        # Find audio packet after video packet
+        # Video packet: 4(type) + 4(size) + 8(pts) + 1(data) = 17 bytes
+        audio_start = BLOCK_HEADER_SIZE + 17
+        ptype = struct.unpack("<I", block[audio_start:audio_start+4])[0]
+        assert ptype == 0x02000000  # PACKET_AUDIO << 24
+
+    def test_custom_codecs(self):
+        block = _build_segment_block(
+            "seg_001",
+            [{"pts_ms": 0, "data": b"\x00"}],
+            [{"pts_ms": 0, "data": b"\x00"}],
+            CODEC_AV1,
+            CODEC_OPUS,
+        )
+        video_codec, audio_codec = struct.unpack("<II", block[20:28])
+        assert video_codec == CODEC_AV1
+        assert audio_codec == CODEC_OPUS
+
+    def test_multiple_video_packets(self):
+        video_pkts = [
+            {"pts_ms": 0, "data": b"\x01"},
+            {"pts_ms": 100, "data": b"\x02"},
+            {"pts_ms": 200, "data": b"\x03"},
+        ]
+        block = _build_segment_block(
+            "seg_001", video_pkts, [{"pts_ms": 0, "data": b"\x00"}],
+            CODEC_H264, CODEC_AAC_LC,
+        )
+        # After header, should have 3 video packets
+        data = block[BLOCK_HEADER_SIZE:]
+        # Count video packet markers
+        count = 0
+        offset = 0
+        while offset < len(data):
+            ptype = struct.unpack("<I", data[offset:offset+4])[0]
+            if ptype == 0x01000000:
+                count += 1
+                psize = struct.unpack("<I", data[offset+4:offset+8])[0]
+                pts = struct.unpack("<Q", data[offset+8:offset+16])[0]
+                offset += 16 + psize
+            else:
+                break
+        assert count == 3
+
+    def test_pts_timestamps(self):
+        block = _build_segment_block(
+            "seg_001",
+            [{"pts_ms": 5000, "data": b"\x00"}],
+            [{"pts_ms": 5500, "data": b"\x00"}],
+            CODEC_H264,
+            CODEC_AAC_LC,
+        )
+        data = block[BLOCK_HEADER_SIZE:]
+        # Video packet PTS at offset 8 within packet
+        pts_video = struct.unpack("<Q", data[8:16])[0]
+        assert pts_video == 5000
+        # Audio packet PTS after video packet
+        video_size = 16 + 1  # header(16) + data(1)
+        pts_audio = struct.unpack("<Q", data[video_size + 8:video_size + 16])[0]
+        assert pts_audio == 5500
+
+    def test_empty_packets(self):
+        block = _build_segment_block(
+            "seg_001", [], [],
+            CODEC_H264, CODEC_AAC_LC,
+        )
+        # Should just be the header
+        assert len(block) == BLOCK_HEADER_SIZE
+        magic = struct.unpack("<4s", block[:4])[0]
+        assert magic == BLOCK_MAGIC
+
+    def test_large_packet_data(self):
+        large_data = bytes(range(256)) * 10  # 2560 bytes
+        block = _build_segment_block(
+            "seg_001",
+            [{"pts_ms": 0, "data": large_data}],
+            [{"pts_ms": 0, "data": b"\x00"}],
+            CODEC_H264,
+            CODEC_AAC_LC,
+        )
+        data = block[BLOCK_HEADER_SIZE:]
+        psize = struct.unpack("<I", data[4:8])[0]
+        assert psize == len(large_data)
+
+
+# --- write_bvf with real packet data ---
+
+class TestWriteBvfWithRealData:
+    def test_roundtrip_with_real_packets(self, tmp_path):
+        muxer = BvfMuxer(movie_id="tt1234567", title="Test Movie")
+        segments = [
+            {
+                "id": "seg_001",
+                "start_time": 0.0, "end_time": 120.0,
+                "tags": [], "risk": "safe", "action": "play",
+                "video_packets": [{"pts_ms": 0, "data": b"\x00\x01\x02\x03"}],
+                "audio_packets": [{"pts_ms": 0, "data": b"\x10\x11"}],
+            },
+            {
+                "id": "seg_002",
+                "start_time": 120.0, "end_time": 180.0,
+                "tags": ["violence"], "risk": "mature", "action": "swap",
+                "profile_segment_id": "filler_001",
+                "video_packets": [{"pts_ms": 120000, "data": b"\x04\x05\x06\x07"}],
+                "audio_packets": [{"pts_ms": 120000, "data": b"\x12\x13"}],
+            },
+        ]
+        profiles = {
+            "child": {"label": "Child", "filters": ["violence"]},
+            "adult": {"label": "Adult", "filters": []},
+        }
+        out = muxer.write_bvf(
+            output_path=tmp_path / "real.bvf",
+            segments=segments,
+            duration_seconds=360.0,
+            profiles=profiles,
+        )
+        parsed = BvfMuxer.read_bvf(out)
+        assert parsed["header"]["segment_count"] == 2
+        assert len(parsed["segments"]) == 2
+        assert parsed["manifest"]["title"] == "Test Movie"
+        assert parsed["manifest"]["movie_id"] == "tt1234567"
+
+    def test_packet_data_integrity(self, tmp_path):
+        """Verify that segment block data offsets and lengths are correct."""
+        muxer = BvfMuxer(movie_id="tt1234567", title="Test Movie")
+        video_data = b"\xde\xad\xbe\xef"
+        audio_data = b"\xca\xfe\xba\xbe"
+        segments = [
+            {
+                "id": "seg_001",
+                "start_time": 0.0, "end_time": 120.0,
+                "tags": [], "risk": "safe", "action": "play",
+                "video_packets": [{"pts_ms": 0, "data": video_data}],
+                "audio_packets": [{"pts_ms": 0, "data": audio_data}],
+            },
+        ]
+        profiles = {"adult": {"label": "Adult", "filters": []}}
+        out = muxer.write_bvf(
+            output_path=tmp_path / "integrity.bvf",
+            segments=segments,
+            duration_seconds=120.0,
+            profiles=profiles,
+        )
+        parsed = BvfMuxer.read_bvf(out)
+        seg = parsed["segments"][0]
+        assert seg["segment_id"] == "seg_001"
+        assert seg["data_length"] > 0
+        # Verify the block starts at the correct offset
+        with open(out, "rb") as f:
+            f.seek(seg["data_offset"])
+            block_data = f.read(seg["data_length"])
+        # First 4 bytes should be SEG\x00
+        assert block_data[:4] == BLOCK_MAGIC
+        # After 32-byte block header, first packet should be video (type 0x01)
+        assert struct.unpack("<I", block_data[32:36])[0] == 0x01000000
+
+    def test_mixed_stub_and_real(self, tmp_path):
+        """Verify segments can mix real and stub blocks."""
+        muxer = BvfMuxer(movie_id="tt1234567", title="Test Movie")
+        segments = [
+            {
+                "id": "seg_001",
+                "start_time": 0.0, "end_time": 120.0,
+                "tags": [], "risk": "safe", "action": "play",
+                # Real packet data
+                "video_packets": [{"pts_ms": 0, "data": b"\x00\x01"}],
+                "audio_packets": [{"pts_ms": 0, "data": b"\x10\x11"}],
+            },
+            {
+                "id": "seg_002",
+                "start_time": 120.0, "end_time": 180.0,
+                "tags": [], "risk": "safe", "action": "play",
+                # No packet data — falls back to stub
+            },
+            {
+                "id": "seg_003",
+                "start_time": 180.0, "end_time": 360.0,
+                "tags": [], "risk": "safe", "action": "play",
+                "video_packets": [{"pts_ms": 180000, "data": b"\x02\x03"}],
+                "audio_packets": [{"pts_ms": 180000, "data": b"\x12\x13"}],
+            },
+        ]
+        profiles = {"adult": {"label": "Adult", "filters": []}}
+        out = muxer.write_bvf(
+            output_path=tmp_path / "mixed.bvf",
+            segments=segments,
+            duration_seconds=360.0,
+            profiles=profiles,
+        )
+        parsed = BvfMuxer.read_bvf(out)
+        assert parsed["header"]["segment_count"] == 3
+        # All three segments should have valid offsets
+        for seg in parsed["segments"]:
+            assert seg["data_offset"] > 0
+            assert seg["data_length"] > 0
+        # Real blocks should be larger than stub blocks
+        assert parsed["segments"][0]["data_length"] > parsed["segments"][1]["data_length"]
+
+    def test_pts_preservation(self, tmp_path):
+        """Verify PTS values survive the write round-trip by checking block structure."""
+        muxer = BvfMuxer(movie_id="tt1234567", title="Test Movie")
+        segments = [
+            {
+                "id": "seg_001",
+                "start_time": 0.0, "end_time": 120.0,
+                "tags": [], "risk": "safe", "action": "play",
+                "video_packets": [{"pts_ms": 42000, "data": b"\x00"}],
+                "audio_packets": [{"pts_ms": 42500, "data": b"\x00"}],
+            },
+        ]
+        profiles = {"adult": {"label": "Adult", "filters": []}}
+        out = muxer.write_bvf(
+            output_path=tmp_path / "pts.bvf",
+            segments=segments,
+            duration_seconds=120.0,
+            profiles=profiles,
+        )
+        with open(out, "rb") as f:
+            f.seek(0)
+            header = f.read(FILE_HEADER_SIZE)
+        parsed = BvfMuxer.read_bvf(out)
+        seg_offset = parsed["segments"][0]["data_offset"]
+        seg_length = parsed["segments"][0]["data_length"]
+        with open(out, "rb") as f:
+            f.seek(seg_offset)
+            block = f.read(seg_length)
+        # Read video packet PTS from block
+        data = block[BLOCK_HEADER_SIZE:]
+        pts_video = struct.unpack("<Q", data[8:16])[0]
+        assert pts_video == 42000
+        # Read audio packet PTS — after video packet (16 header + 1 data = 17)
+        pts_audio = struct.unpack("<Q", data[17 + 8:17 + 16])[0]
+        assert pts_audio == 42500
