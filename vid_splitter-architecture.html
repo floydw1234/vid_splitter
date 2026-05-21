@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>vid_splitter — Smart Branching Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #020617;
+      min-height: 100vh;
+      padding: 2rem;
+      color: white;
+    }
+    .container { max-width: 1300px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot {
+      width: 12px; height: 12px; background: #22d3ee;
+      border-radius: 50%; animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .diagram-container {
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 1rem; border: 1px solid #1e293b;
+      padding: 1.5rem; overflow-x: auto;
+    }
+    svg { width: 100%; min-width: 1100px; display: block; }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1rem; margin-top: 2rem;
+    }
+    .card {
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 0.75rem; border: 1px solid #1e293b;
+      padding: 1.25rem;
+    }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; }
+    .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; }
+    .card-dot.amber { background: #fbbf24; }
+    .card-dot.rose { background: #fb7185; }
+    .card-dot.orange { background: #fb923c; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>vid_splitter — Smart Branching</h1>
+      </div>
+      <p class="subtitle">Context-aware Jellyfin playback · Mature content filtering via BVF container format</p>
+    </div>
+
+    <!-- Main Diagram -->
+    <div class="diagram-container">
+      <svg viewBox="0 0 1200 820">
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrowhead-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee" />
+          </marker>
+          <marker id="arrowhead-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#34d399" />
+          </marker>
+          <marker id="arrowhead-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa" />
+          </marker>
+          <marker id="arrowhead-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24" />
+          </marker>
+          <marker id="arrowhead-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185" />
+          </marker>
+          <marker id="arrowhead-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb923c" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- =================================================================
+             BOUNDARIES
+             ================================================================= -->
+
+        <!-- Python CLI Phase (left side) -->
+        <rect x="20" y="30" width="540" height="760" rx="12"
+              fill="rgba(8, 51, 68, 0.06)" stroke="#22d3ee" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="35" y="52" fill="#22d3ee" font-size="10" font-weight="600">PHASE 1: PRE-PROCESSING (Python CLI)</text>
+
+        <!-- Jellyfin Server (right side) -->
+        <rect x="580" y="30" width="600" height="760" rx="12"
+              fill="rgba(6, 78, 59, 0.06)" stroke="#34d399" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="595" y="52" fill="#34d399" font-size="10" font-weight="600">PHASE 2: PLAYBACK (Jellyfin Server · .NET 9)</text>
+
+        <!-- =================================================================
+             PHASE 1: PYTHON CLI COMPONENTS
+             ================================================================= -->
+
+        <!-- Input Video -->
+        <rect x="40" y="80" width="180" height="60" rx="6"
+              fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="130" y="103" fill="white" font-size="11" font-weight="600" text-anchor="middle">Input Video</text>
+        <text x="130" y="121" fill="#94a3b8" font-size="9" text-anchor="middle">.mp4 / .mkv · H.264/H.265</text>
+
+        <!-- Whisper Model -->
+        <rect x="40" y="180" width="180" height="60" rx="6"
+              fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="130" y="203" fill="white" font-size="11" font-weight="600" text-anchor="middle">Whisper</text>
+        <text x="130" y="221" fill="#94a3b8" font-size="9" text-anchor="middle">Audio Transcription</text>
+        <text x="130" y="235" fill="#22d3ee" font-size="8" text-anchor="middle">word_timestamps=True</text>
+
+        <!-- NSFW Safety Checker -->
+        <rect x="40" y="280" width="180" height="60" rx="6"
+              fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="130" y="303" fill="white" font-size="11" font-weight="600" text-anchor="middle">Safety Checker</text>
+        <text x="130" y="321" fill="#94a3b8" font-size="9" text-anchor="middle">NSFW Frame Classification</text>
+        <text x="130" y="335" fill="#fb7185" font-size="8" text-anchor="middle">Stable Diffusion</text>
+
+        <!-- FFmpeg (frame extraction) -->
+        <rect x="40" y="380" width="180" height="60" rx="6"
+              fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="130" y="403" fill="white" font-size="11" font-weight="600" text-anchor="middle">FFmpeg</text>
+        <text x="130" y="421" fill="#94a3b8" font-size="9" text-anchor="middle">Frame Extraction</text>
+        <text x="130" y="435" fill="#fbbf24" font-size="8" text-anchor="middle">1 frame / 5s</text>
+
+        <!-- Analyzer Core (orchestrator) -->
+        <rect x="280" y="280" width="240" height="160" rx="8"
+              fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="400" y="305" fill="white" font-size="12" font-weight="600" text-anchor="middle">MovieAnalyzer</text>
+        <text x="400" y="325" fill="#94a3b8" font-size="9" text-anchor="middle">analyze.py</text>
+        <text x="400" y="343" fill="#94a3b8" font-size="9" text-anchor="middle">• _build_detections()</text>
+        <text x="400" y="359" fill="#94a3b8" font-size="9" text-anchor="middle">• _merge_segments()</text>
+        <text x="400" y="375" fill="#94a3b8" font-size="9" text-anchor="middle">• _fill_gaps()</text>
+        <text x="400" y="393" fill="#94a3b8" font-size="9" text-anchor="middle">• _build_manifest()</text>
+        <text x="400" y="413" fill="#22d3ee" font-size="8" text-anchor="middle">Keyframe-aligned boundaries</text>
+
+        <!-- Output: _branch.json (legacy) -->
+        <rect x="280" y="480" width="240" height="60" rx="6"
+              fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="400" y="503" fill="white" font-size="11" font-weight="600" text-anchor="middle">_branch.json</text>
+        <text x="400" y="521" fill="#94a3b8" font-size="9" text-anchor="middle">Legacy manifest (JSON sidecar)</text>
+
+        <!-- Output: .bvf container (future) -->
+        <rect x="280" y="560" width="240" height="60" rx="6"
+              fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="400" y="583" fill="white" font-size="11" font-weight="600" text-anchor="middle">movie.bvf</text>
+        <text x="400" y="601" fill="#94a3b8" font-size="9" text-anchor="middle">BVF container (self-contained)</text>
+        <text x="400" y="615" fill="#a78bfa" font-size="8" text-anchor="middle">zstd manifest + keyframe blocks</text>
+
+        <!-- Filler Videos -->
+        <rect x="40" y="640" width="180" height="60" rx="6"
+              fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="130" y="663" fill="white" font-size="11" font-weight="600" text-anchor="middle">Filler Videos</text>
+        <text x="130" y="681" fill="#94a3b8" font-size="9" text-anchor="middle">Safe replacements</text>
+        <text x="130" y="695" fill="#fbbf24" font-size="8" text-anchor="middle">/srv/jellyfin/filler/</text>
+
+        <!-- =================================================================
+             PHASE 2: JELLYFIN PLUGIN COMPONENTS
+             ================================================================= -->
+
+        <!-- Jellyfin Server Core -->
+        <rect x="610" y="80" width="540" height="60" rx="6"
+              fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="880" y="103" fill="white" font-size="11" font-weight="600" text-anchor="middle">Jellyfin Server (.NET 9)</text>
+        <text x="880" y="121" fill="#94a3b8" font-size="9" text-anchor="middle">MediaBrowser.Controller · Streaming Pipeline</text>
+
+        <!-- Plugin Entry Point -->
+        <rect x="610" y="180" width="240" height="60" rx="6"
+              fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="730" y="203" fill="white" font-size="11" font-weight="600" text-anchor="middle">Plugin.cs</text>
+        <text x="730" y="221" fill="#94a3b8" font-size="9" text-anchor="middle">Entry Point · Library Scan</text>
+        <text x="730" y="235" fill="#34d399" font-size="8" text-anchor="middle">OnStartup() → FindAllManifests()</text>
+
+        <!-- Manifest Scanner -->
+        <rect x="610" y="280" width="240" height="60" rx="6"
+              fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="730" y="303" fill="white" font-size="11" font-weight="600" text-anchor="middle">ManifestScanner</text>
+        <text x="730" y="321" fill="#94a3b8" font-size="9" text-anchor="middle">Find .bvf / _branch.json</text>
+        <text x="730" y="335" fill="#34d399" font-size="8" text-anchor="middle">Per-video path resolution</text>
+
+        <!-- BVF Reader / Manifest Reader -->
+        <rect x="610" y="380" width="240" height="60" rx="6"
+              fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="730" y="403" fill="white" font-size="11" font-weight="600" text-anchor="middle">ManifestReader / BVFReader</text>
+        <text x="730" y="421" fill="#94a3b8" font-size="9" text-anchor="middle">Parse header + index + manifest</text>
+        <text x="730" y="435" fill="#34d399" font-size="8" text-anchor="middle">zstd decompress · O(1) seek</text>
+
+        <!-- Profile Resolver -->
+        <rect x="610" y="480" width="240" height="60" rx="6"
+              fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="730" y="503" fill="white" font-size="11" font-weight="600" text-anchor="middle">ProfileResolver</text>
+        <text x="730" y="521" fill="#94a3b8" font-size="9" text-anchor="middle">User → Profile Mapping</text>
+        <text x="730" y="535" fill="#fb7185" font-size="8" text-anchor="middle">Birthday + Sex → child/teen/adult</text>
+
+        <!-- Segment Server -->
+        <rect x="610" y="580" width="240" height="60" rx="6"
+              fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="730" y="603" fill="white" font-size="11" font-weight="600" text-anchor="middle">SegmentServer</text>
+        <text x="730" y="621" fill="#94a3b8" font-size="9" text-anchor="middle">Serve resolved segments</text>
+        <text x="730" y="635" fill="#34d399" font-size="8" text-anchor="middle">Jellyfin streaming pipeline</text>
+
+        <!-- Config Page -->
+        <rect x="610" y="680" width="240" height="60" rx="6"
+              fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="730" y="703" fill="white" font-size="11" font-weight="600" text-anchor="middle">configPage.html</text>
+        <text x="730" y="721" fill="#94a3b8" font-size="9" text-anchor="middle">User Profile Table</text>
+        <text x="730" y="735" fill="#22d3ee" font-size="8" text-anchor="middle">Live profile resolution badges</text>
+
+        <!-- Jellyfin Player (client) -->
+        <rect x="900" y="180" width="240" height="60" rx="6"
+              fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="1020" y="203" fill="white" font-size="11" font-weight="600" text-anchor="middle">Jellyfin Player</text>
+        <text x="1020" y="221" fill="#94a3b8" font-size="9" text-anchor="middle">Browser / Mobile / TV</text>
+
+        <!-- Plugin Config Store -->
+        <rect x="900" y="380" width="240" height="60" rx="6"
+              fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="1020" y="403" fill="white" font-size="11" font-weight="600" text-anchor="middle">Plugin Configuration</text>
+        <text x="1020" y="421" fill="#94a3b8" font-size="9" text-anchor="middle">UserBranchProfile[]</text>
+        <text x="1020" y="435" fill="#a78bfa" font-size="8" text-anchor="middle">birthday · sex · override</text>
+
+        <!-- =================================================================
+             CONNECTIONS
+             ================================================================= -->
+
+        <!-- Input → Analyzer (video data) -->
+        <line x1="220" y1="110" x2="278" y2="310" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrowhead)" stroke-dasharray="4,3"/>
+        <text x="235" y="200" fill="#94a3b8" font-size="8" transform="rotate(-30, 235, 200)">video stream</text>
+
+        <!-- Whisper → Analyzer (audio detections) -->
+        <line x1="220" y1="210" x2="278" y2="330" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+        <text x="235" y="260" fill="#22d3ee" font-size="8">word timestamps</text>
+
+        <!-- FFmpeg → Safety Checker (frames) -->
+        <line x1="220" y1="410" x2="220" y2="340" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead-amber)"/>
+        <text x="235" y="380" fill="#fbbf24" font-size="8">frames @ 5s</text>
+
+        <!-- Safety Checker → Analyzer (NSFW flags) -->
+        <line x1="220" y1="310" x2="278" y2="350" stroke="#fb7185" stroke-width="1.5" marker-end="url(#arrowhead-rose)"/>
+        <text x="235" y="330" fill="#fb7185" font-size="8">NSFW scores</text>
+
+        <!-- Analyzer → _branch.json -->
+        <line x1="400" y1="440" x2="400" y2="478" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+        <text x="415" y="462" fill="#22d3ee" font-size="8">manifest</text>
+
+        <!-- Analyzer → .bvf -->
+        <line x1="400" y1="440" x2="400" y2="558" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)"/>
+        <text x="415" y="510" fill="#a78bfa" font-size="8">BVF container</text>
+
+        <!-- Filler → Analyzer (referenced in manifest) -->
+        <line x1="220" y1="670" x2="278" y2="410" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead-amber)" stroke-dasharray="4,3"/>
+        <text x="230" y="560" fill="#fbbf24" font-size="8">filler refs</text>
+
+        <!-- BVF/Branch JSON → ManifestScanner (file discovery) -->
+        <line x1="520" y1="590" x2="608" y2="310" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)" stroke-dasharray="6,4"/>
+        <text x="550" y="440" fill="#a78bfa" font-size="8">.bvf / _branch.json</text>
+
+        <!-- Plugin → ManifestScanner -->
+        <line x1="730" y1="240" x2="730" y2="278" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- ManifestScanner → ManifestReader -->
+        <line x1="730" y1="340" x2="730" y2="378" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- ManifestReader → ProfileResolver -->
+        <line x1="730" y1="440" x2="730" y2="478" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- ProfileResolver → SegmentServer -->
+        <line x1="730" y1="540" x2="730" y2="578" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- SegmentServer → Jellyfin Player (stream) -->
+        <line x1="850" y1="610" x2="998" y2="210" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <text x="940" y="400" fill="#34d399" font-size="8" transform="rotate(-60, 940, 400)">filtered stream</text>
+
+        <!-- Plugin → Config Page -->
+        <line x1="730" y1="240" x2="730" y2="678" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)" stroke-dasharray="4,3"/>
+
+        <!-- Config Store → ProfileResolver (user data) -->
+        <line x1="900" y1="410" x2="852" y2="510" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)"/>
+        <text x="870" y="455" fill="#a78bfa" font-size="8">UserBranchProfile[]</text>
+
+        <!-- =================================================================
+             LEGEND
+             ================================================================= -->
+        <text x="940" y="70" fill="white" font-size="10" font-weight="600">Legend</text>
+
+        <rect x="940" y="82" width="16" height="10" rx="2" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="962" y="90" fill="#94a3b8" font-size="8">Frontend / Client</text>
+
+        <rect x="940" y="98" width="16" height="10" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="962" y="106" fill="#94a3b8" font-size="8">Backend / Plugin</text>
+
+        <rect x="940" y="114" width="16" height="10" rx="2" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="962" y="122" fill="#94a3b8" font-size="8">Database / Storage</text>
+
+        <rect x="940" y="130" width="16" height="10" rx="2" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="962" y="138" fill="#94a3b8" font-size="8">External / Tooling</text>
+
+        <rect x="940" y="146" width="16" height="10" rx="2" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1"/>
+        <text x="962" y="154" fill="#94a3b8" font-size="8">Security / Auth</text>
+
+        <line x1="940" y1="168" x2="956" y2="168" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="962" y="171" fill="#94a3b8" font-size="8">Optional / Deferred</text>
+
+        <rect x="940" y="178" width="16" height="10" rx="2" fill="transparent" stroke="#22d3ee" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="962" y="186" fill="#94a3b8" font-size="8">Phase Boundary</text>
+
+        <!-- =================================================================
+             ANNOTATIONS
+             ================================================================= -->
+
+        <!-- Data flow label: Analysis → Playback -->
+        <rect x="530" y="540" width="60" height="20" rx="4"
+              fill="rgba(15, 23, 42, 0.9)" stroke="#1e293b" stroke-width="1"/>
+        <text x="560" y="554" fill="#a78bfa" font-size="8" text-anchor="middle">artifact</text>
+
+        <!-- Profile resolution flow label -->
+        <rect x="850" y="560" width="60" height="20" rx="4"
+              fill="rgba(15, 23, 42, 0.9)" stroke="#1e293b" stroke-width="1"/>
+        <text x="880" y="574" fill="#fb7185" font-size="8" text-anchor="middle">resolve</text>
+
+        <!-- Branching decision label -->
+        <rect x="850" y="660" width="60" height="20" rx="4"
+              fill="rgba(15, 23, 42, 0.9)" stroke="#1e293b" stroke-width="1"/>
+        <text x="880" y="674" fill="#34d399" font-size="8" text-anchor="middle">branch</text>
+
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot cyan"></div>
+          <h3>Analysis Pipeline</h3>
+        </div>
+        <ul>
+          <li>• Whisper transcribes audio with word-level timestamps</li>
+          <li>• FFmpeg extracts 1 frame every 5 seconds</li>
+          <li>• Stable Diffusion Safety Checker classifies NSFW</li>
+          <li>• Detections merged into contiguous, keyframe-aligned segments</li>
+          <li>• Gap filling ensures full video coverage</li>
+          <li>• Outputs _branch.json (current) or .bvf (future)</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot emerald"></div>
+          <h3>Playback Architecture</h3>
+        </div>
+        <ul>
+          <li>• Plugin scans Jellyfin library on startup for manifests</li>
+          <li>• Registers virtual "Smart Branch" media sources</li>
+          <li>• ProfileResolver maps users → child/teen/adult</li>
+          <li>• SegmentServer swaps/skips mature content per profile</li>
+          <li>• Filler videos replace flagged segments</li>
+          <li>• Runs entirely inside Jellyfin — no external services</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot violet"></div>
+          <h3>BVF Container Format</h3>
+        </div>
+        <ul>
+          <li>• Single self-contained file: manifest + all segments</li>
+          <li>• 64-byte header → 40-byte index entries → zstd manifest → data blocks</li>
+          <li>• O(1) random access via byte-offset index</li>
+          <li>• Profile-aware: multiple viewer profiles in one file</li>
+          <li>• Keyframe-aligned boundaries for seamless seeking</li>
+          <li>• Streamable: index at front, playback before full download</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot amber"></div>
+          <h3>Profile System</h3>
+        </div>
+        <ul>
+          <li>• child (under 13): filters nudity, violence, language, fear</li>
+          <li>• teen_m (13–17, male): filters nudity, gore</li>
+          <li>• teen_f (13–17, female): filters nudity, violence</li>
+          <li>• adult (18+): no filters</li>
+          <li>• Auto-resolved from birthday + sex in plugin config</li>
+          <li>• ProfileOverride forces explicit profile assignment</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot rose"></div>
+          <h3>Stack &amp; Dependencies</h3>
+        </div>
+        <ul>
+          <li>• Python: whisper, diffusers, ffmpeg-python, torch, zstandard</li>
+          <li>• C#: .NET 9, Jellyfin SDK, System.Text.Json</li>
+          <li>• Models: Whisper (base/small/medium), SD Safety Checker</li>
+          <li>• GPU: Safety Checker can use CUDA for faster inference</li>
+          <li>• Codec support: H.264, H.265, AV1, VP9 + AAC, Opus, AC-3</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot orange"></div>
+          <h3>Roadmap</h3>
+        </div>
+        <ul>
+          <li>• BVF muxer integration (Python → .bvf output)</li>
+          <li>• End-to-end test with real video file</li>
+          <li>• BVF reference player (bvf_player.py)</li>
+          <li>• libbvf C library for VLC/mpv embedding</li>
+          <li>• mpv demuxer plugin</li>
+          <li>• BVF-aware HLS transcoding in Jellyfin</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <p class="footer">
+      vid_splitter · Smart Branching Plugin · Jellyfin · 2026
+    </p>
+  </div>
+</body>
+</html>

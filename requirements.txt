@@ -2,6 +2,7 @@
 ffmpeg-python
 openai-whisper
 torch
+# Marlin-2B alternative analyzer path
 transformers
 torchvision
 accelerate

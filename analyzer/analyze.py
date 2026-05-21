@@ -24,7 +24,7 @@ import torch
 import ffmpeg
 import whisper
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-from transformers import AutoFeatureExtractor
+from transformers import CLIPImageProcessor
 from PIL import Image
 import numpy as np
 
@@ -82,7 +82,7 @@ class MovieAnalyzer:
         self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
             "CompVis/stable-diffusion-safety-checker"
         ).to(self._device)
-        self.feature_extractor = AutoFeatureExtractor.from_pretrained(
+        self.feature_extractor = CLIPImageProcessor.from_pretrained(
             "CompVis/stable-diffusion-safety-checker"
         )
 
