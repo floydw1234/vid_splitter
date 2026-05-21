@@ -15,7 +15,7 @@ public class ProfileResolver
 {
     /// <summary>
     /// Maps a Jellyfin user to a branch profile key.
-    ///
+    /// 
     /// Resolution order:
     ///   1. Explicit ProfileOverride stored in plugin config for this user
     ///   2. Auto-resolved from stored Birthday + Sex
@@ -45,6 +45,47 @@ public class ProfileResolver
 
         // 3. Fall back to the plugin's default profile
         return config?.DefaultProfile ?? "adult";
+    }
+
+    /// <summary>
+    /// Maps a Jellyfin user to a branch profile key for BVF manifests.
+    /// For BVF, the manifest already has profile definitions, so we just
+    /// need to map the user to one of those profile keys.
+    /// </summary>
+    public string ResolveProfileForBvf(UserDto user, BVFManifest manifest)
+    {
+        var config = Plugin.Instance?.Configuration;
+        var userId = user.Id.ToString();
+
+        if (config?.UserProfiles != null &&
+            config.UserProfiles.TryGetValue(userId, out var stored))
+        {
+            // 1. Explicit override wins
+            if (!string.IsNullOrEmpty(stored.ProfileOverride) &&
+                manifest.Profiles.ContainsKey(stored.ProfileOverride))
+                return stored.ProfileOverride;
+
+            // 2. Auto-resolve from birthday + sex
+            if (!string.IsNullOrEmpty(stored.Birthday) &&
+                DateOnly.TryParse(stored.Birthday, out var dob))
+            {
+                var age = CalculateAge(dob);
+                return ResolveFromAgeSex(age, stored.Sex ?? "unset");
+            }
+        }
+
+        // 3. Fall back to the first profile in the manifest, or "adult"
+        if (manifest.Profiles.ContainsKey("adult"))
+            return "adult";
+
+        if (manifest.Profiles.ContainsKey("teen"))
+            return "teen";
+
+        if (manifest.Profiles.ContainsKey("child"))
+            return "child";
+
+        // Return the first available profile key
+        return manifest.Profiles.Keys.FirstOrDefault() ?? "adult";
     }
 
     /// <summary>

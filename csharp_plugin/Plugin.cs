@@ -32,9 +32,9 @@ namespace Jellyfin.Plugin.SmartBranching;
 
 /// <summary>
 /// The main Smart Branching plugin.
-/// Scans for _branch.json manifests and registers virtual "Smart Branch" media sources.
+/// Scans for .bvf files and registers the SegmentServer as a video processor.
 /// </summary>
-public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IServerEntryPoint
+public class Plugin : BasePlugin<PluginConfiguration>, IMainEntryPoint
 {
     private readonly IServerApplicationPaths _applicationPaths;
     private readonly ILogger<Plugin> _logger;
@@ -78,32 +78,60 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IServerEntr
         };
     }
 
-    /// <summary>
-    /// Called when the server is starting up.
-    /// Scans the library for _branch.json manifests and registers virtual sources.
-    /// </summary>
-    public Task OnStartup()
+    /// <inheritdoc />
+    public void OnApplicationHost(MediaBrowser.Controller.ApplicationHost applicationHost)
     {
-        _logger.LogInformation("Smart Branching plugin starting up");
+        _logger.LogInformation("Smart Branching plugin initializing");
         
-        // Scan library for branch manifests
-        var manifests = ManifestScanner.FindAllManifests(_libraryManager, _logger);
-        _logger.LogInformation("Found {Count} branch manifests", manifests.Count);
+        // Register as a video processor
+        var segmentServer = new SegmentServer(_logger, _applicationPaths);
         
-        foreach (var manifest in manifests)
+        // Scan library for BVF files
+        var bvfs = ScanForBvfFiles();
+        _logger.LogInformation("Found {Count} BVF files in library", bvfs.Count);
+        
+        foreach (var bvf in bvfs)
         {
-            _logger.LogInformation(
-                "Registered virtual source for: {MovieId} ({Path})",
-                manifest.MovieId,
-                manifest.MoviePath);
+            _logger.LogInformation("Registered BVF source: {Path}", bvf);
         }
-
-        return Task.CompletedTask;
     }
 
     /// <summary>
-    /// Called when the server is shutting down.
+    /// Scans the library for .bvf files.
     /// </summary>
+    private List<string> ScanForBvfFiles()
+    {
+        var bvfPaths = new List<string>();
+        
+        try
+        {
+            var query = new InternalItemsQuery
+            {
+                MediaTypes = new[] { MediaType.Video },
+                IsVirtualItem = false,
+            };
+
+            var videos = _libraryManager.GetItemList(query);
+            var segmentServer = new SegmentServer(_logger, _applicationPaths);
+
+            foreach (var video in videos)
+            {
+                var bvfPath = segmentServer.FindBvfFile(video.Path);
+                if (bvfPath != null)
+                {
+                    bvfPaths.Add(bvfPath);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to scan library for BVF files");
+        }
+
+        return bvfPaths;
+    }
+
+    /// <inheritdoc />
     public Task OnShutdown()
     {
         _logger.LogInformation("Smart Branching plugin shutting down");
