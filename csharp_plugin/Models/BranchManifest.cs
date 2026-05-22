@@ -69,6 +69,23 @@ public class Segment
 
     [JsonPropertyName("swap_options")]
     public Dictionary<string, string>? SwapOptions { get; set; }
+
+    [JsonPropertyName("profiles")]
+    public Dictionary<string, SegmentProfileAction> Profiles { get; set; } = new();
+
+    [JsonPropertyName("is_filler")]
+    public bool IsFiller { get; set; }
+}
+/// <summary>
+/// A BVF per-profile segment action.
+/// </summary>
+public class SegmentProfileAction
+{
+    [JsonPropertyName("action")]
+    public string Action { get; set; } = string.Empty;
+
+    [JsonPropertyName("segment_id")]
+    public string SegmentId { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -81,4 +98,9 @@ public class ResolvedSegment
     public string ResolvedPath { get; set; } = string.Empty;
     public bool IsSwapped { get; set; }
     public string SwapType { get; set; } = string.Empty; // "filler", "original", "skip"
+    public string SegmentId { get; set; } = string.Empty;
+    public ulong DataOffset { get; set; }
+    public ulong DataLength { get; set; }
+    public ulong DurationMs { get; set; }
+    public string AudioHash { get; set; } = string.Empty;
 }

@@ -17,12 +17,18 @@
     <PackageReference Include="Jellyfin.Model" Version="10.9.11">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
+    <PackageReference Include="ZstdNet" Version="1.4.*" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="SerilogAnalyzer" Version="0.15.0" PrivateAssets="All" />
     <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-beta.556" PrivateAssets="All" />
     <PackageReference Include="SmartAnalyzers.MultithreadingAnalyzer" Version="1.1.31" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Assets\Scripts\BVFReader.cs" Link="BVFReader.cs" />
+    <Compile Include="..\Assets\Scripts\BVFSegment.cs" Link="BVFSegment.cs" />
   </ItemGroup>
 
 </Project>

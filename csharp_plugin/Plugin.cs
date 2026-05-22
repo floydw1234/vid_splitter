@@ -32,11 +32,10 @@ namespace Jellyfin.Plugin.SmartBranching;
 
 /// <summary>
 /// The main Smart Branching plugin.
-/// Scans for _branch.json manifests and registers virtual "Smart Branch" media sources.
+/// Scans for .bvf containers and registers virtual "Smart Branch" media sources.
 /// </summary>
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IServerEntryPoint
 {
-    private readonly IServerApplicationPaths _applicationPaths;
     private readonly ILogger<Plugin> _logger;
     private readonly ILibraryManager _libraryManager;
 
@@ -53,8 +52,9 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IServerEntr
         ILogger<Plugin> logger)
         : base(applicationPaths, xmlSerializer)
     {
+        ArgumentNullException.ThrowIfNull(serverApplicationPaths);
+
         Instance = this;
-        _applicationPaths = serverApplicationPaths;
         _logger = logger;
         _libraryManager = libraryManager;
     }
@@ -80,15 +80,15 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IServerEntr
 
     /// <summary>
     /// Called when the server is starting up.
-    /// Scans the library for _branch.json manifests and registers virtual sources.
+    /// Scans the library for .bvf containers and registers virtual sources.
     /// </summary>
     public Task OnStartup()
     {
         _logger.LogInformation("Smart Branching plugin starting up");
         
-        // Scan library for branch manifests
+        // Scan library for BVF containers.
         var manifests = ManifestScanner.FindAllManifests(_libraryManager, _logger);
-        _logger.LogInformation("Found {Count} branch manifests", manifests.Count);
+        _logger.LogInformation("Found {Count} BVF manifests", manifests.Count);
         
         foreach (var manifest in manifests)
         {

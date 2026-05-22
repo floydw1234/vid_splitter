@@ -11,9 +11,10 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.SmartBranching;
 
 /// <summary>
-/// Scans the Jellyfin library for .bvf containers.
+/// Scans the Jellyfin library for .bvf files and reads their BVF manifests.
+/// Reads BVF binary format containers.
 /// </summary>
-public static class ManifestScanner
+public static class BVFScanner
 {
     /// <summary>
     /// Scans all video items in the library for corresponding .bvf files.

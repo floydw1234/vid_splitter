@@ -23,13 +23,12 @@ namespace Jellyfin.Plugin.SmartBranching;
 /// 1. User clicks "Play" on a movie
 /// 2. Jellyfin calls our video processor
 /// 3. We read the manifest, resolve segments for the user's profile
-/// 4. We serve the resolved .ts segments through Jellyfin's streaming pipeline
+/// 4. We serve the resolved BVF segment data blocks through Jellyfin's streaming pipeline
 /// 5. Segments marked for swap are replaced with fillers or skipped
 /// </summary>
 public class SegmentServer : ICustomSubtitleStreamService, ISubtitleEncoder, IImageEncoder, IVideosByNameProcessor
 {
     private readonly ILogger<SegmentServer> _logger;
-    private readonly IApplicationPaths _applicationPaths;
     private readonly ProfileResolver _profileResolver;
     private readonly Dictionary<string, BranchManifest> _manifestCache = new();
 
@@ -37,25 +36,28 @@ public class SegmentServer : ICustomSubtitleStreamService, ISubtitleEncoder, IIm
         ILogger<SegmentServer> logger,
         IApplicationPaths applicationPaths)
     {
+        ArgumentNullException.ThrowIfNull(applicationPaths);
+
         _logger = logger;
-        _applicationPaths = applicationPaths;
         _profileResolver = new ProfileResolver();
     }
 
     /// <summary>
-    /// Gets or creates a manifest for a movie, with caching.
+    /// Gets or creates a BVF manifest for a movie, with caching.
     /// </summary>
     private BranchManifest GetManifest(string moviePath)
     {
-        if (_manifestCache.TryGetValue(moviePath, out var cached))
+        var bvfPath = ManifestScanner.GetBvfPath(moviePath)
+            ?? throw new FileNotFoundException($"Cannot determine BVF path for: {moviePath}");
+
+        if (_manifestCache.TryGetValue(bvfPath, out var cached))
             return cached;
 
-        var manifestPath = ManifestReader.FindForMovie(moviePath);
-        if (manifestPath == null)
-            throw new FileNotFoundException($"No manifest found for: {moviePath}");
+        if (!File.Exists(bvfPath))
+            throw new FileNotFoundException($"No BVF file found for: {moviePath}");
 
-        var manifest = ManifestReader.Load(manifestPath);
-        _manifestCache[moviePath] = manifest;
+        var manifest = BVFReader.LoadBvfManifest(bvfPath, moviePath);
+        _manifestCache[bvfPath] = manifest;
 
         return manifest;
     }
@@ -66,35 +68,41 @@ public class SegmentServer : ICustomSubtitleStreamService, ISubtitleEncoder, IIm
     public void ClearCache()
     {
         _manifestCache.Clear();
-        _logger.LogInformation("Manifest cache cleared");
+        _logger.LogInformation("BVF manifest cache cleared");
     }
 
     /// <summary>
-    /// Resolves all segments for a movie and user profile.
-    /// Returns a list of resolved segments with actual file paths.
+    /// Resolves all BVF segments for a movie and user profile.
     /// </summary>
     public List<ResolvedSegment> ResolveAllSegments(string moviePath, UserDto user)
     {
+        var bvfPath = ManifestScanner.GetBvfPath(moviePath)
+            ?? throw new FileNotFoundException($"Cannot determine BVF path for: {moviePath}");
         var manifest = GetManifest(moviePath);
         var profile = _profileResolver.ResolveProfile(user, manifest);
-        var movieDirectory = Path.GetDirectoryName(moviePath)
-            ?? Path.GetDirectoryName(manifest.MoviePath)
-            ?? throw new InvalidOperationException($"Cannot determine movie directory for: {moviePath}");
+        var segments = BVFReader.GetSegments(bvfPath, profile);
+        var manifestById = manifest.Segments.ToDictionary(s => s.Id, StringComparer.Ordinal);
 
-        var fillerDirectory = Path.Combine(
-            _applicationPaths.DataPath,
-            Plugin.Instance?.Configuration.FillerDirectory ?? "smart_branching/filler");
-
-        var resolved = new List<ResolvedSegment>();
-
-        foreach (var segment in manifest.Segments)
+        var resolved = new List<ResolvedSegment>(segments.Length);
+        foreach (var segment in segments)
         {
-            var resolvedSeg = _profileResolver.ResolveSegment(segment, profile, movieDirectory, fillerDirectory);
-            resolved.Add(resolvedSeg);
+            manifestById.TryGetValue(segment.segmentId, out var source);
+            resolved.Add(new ResolvedSegment
+            {
+                Source = source ?? new Segment { Id = segment.segmentId },
+                ResolvedPath = bvfPath,
+                IsSwapped = source?.IsFiller ?? false,
+                SwapType = source?.IsFiller == true ? "filler" : "original",
+                SegmentId = segment.segmentId,
+                DataOffset = segment.dataOffset,
+                DataLength = segment.dataLength,
+                DurationMs = segment.durationMs,
+                AudioHash = segment.audioHash,
+            });
         }
 
         _logger.LogInformation(
-            "Resolved {Total} segments for {Movie} (profile: {Profile}, swapped: {Swapped})",
+            "Resolved {Total} BVF segments for {Movie} (profile: {Profile}, swapped: {Swapped})",
             resolved.Count,
             manifest.MovieId,
             profile,
@@ -104,20 +112,54 @@ public class SegmentServer : ICustomSubtitleStreamService, ISubtitleEncoder, IIm
     }
 
     /// <summary>
-    /// Checks if a movie has an associated branch manifest.
+    /// Opens the raw BVF segment data block for a resolved segment.
     /// </summary>
-    public bool HasBranchManifest(string moviePath)
+    public Stream OpenSegmentStream(ResolvedSegment segment)
     {
-        return ManifestReader.FindForMovie(moviePath) != null;
+        if (string.IsNullOrEmpty(segment.ResolvedPath))
+            throw new ArgumentException("Resolved segment does not point at a BVF file.", nameof(segment));
+
+        return BVFReader.OpenSegmentDataStream(
+            segment.ResolvedPath,
+            new BVFSegment
+            {
+                segmentId = segment.SegmentId,
+                dataOffset = segment.DataOffset,
+                dataLength = segment.DataLength,
+                durationMs = segment.DurationMs,
+                audioHash = segment.AudioHash,
+            });
     }
 
     /// <summary>
-    /// Gets the manifest for a movie without caching (for admin/debug).
+    /// Reads the raw BVF segment data block for a resolved segment.
+    /// </summary>
+    public byte[] ReadSegmentData(ResolvedSegment segment)
+    {
+        using var stream = OpenSegmentStream(segment);
+        using var memory = new MemoryStream();
+        stream.CopyTo(memory);
+        return memory.ToArray();
+    }
+
+    /// <summary>
+    /// Checks if a movie has an associated BVF container.
+    /// </summary>
+    public bool HasBranchManifest(string moviePath)
+    {
+        var bvfPath = ManifestScanner.GetBvfPath(moviePath);
+        return bvfPath != null && File.Exists(bvfPath);
+    }
+
+    /// <summary>
+    /// Gets the BVF manifest for a movie without caching (for admin/debug).
     /// </summary>
     public BranchManifest GetManifestRaw(string moviePath)
     {
-        return ManifestReader.Load(ManifestReader.FindForMovie(moviePath) 
-            ?? throw new FileNotFoundException($"No manifest found for: {moviePath}"));
+        var bvfPath = ManifestScanner.GetBvfPath(moviePath)
+            ?? throw new FileNotFoundException($"Cannot determine BVF path for: {moviePath}");
+
+        return BVFReader.LoadBvfManifest(bvfPath, moviePath);
     }
 
     // ─── ICustomSubtitleStreamService (required interface) ────────────
