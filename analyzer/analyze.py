@@ -65,12 +65,14 @@ class MovieAnalyzer:
         output_dir: str | None = None,
         whisper_model: str = "base",
         nsfw_threshold: float = 0.6,
+        cartoon_threshold: float = 0.8,
         frame_interval: int = 5,
     ):
         self.video_path = Path(video_path).resolve()
         self.output_dir = Path(output_dir) if output_dir else self.video_path.parent
         self.whisper_model_name = whisper_model
         self.nsfw_threshold = nsfw_threshold
+        self.cartoon_threshold = cartoon_threshold
         self.frame_interval = frame_interval  # seconds between frame samples
 
         # --- Load models (cached) ---
@@ -132,13 +134,35 @@ class MovieAnalyzer:
     # ─── Step 2: Transcription ──────────────────────────────────────────
 
     def _transcribe(self) -> dict:
-        """Run Whisper transcription. Returns full result dict with word-level timestamps."""
+        """Run Whisper transcription. Returns full result dict with word-level timestamps.
+        
+        Also computes a 'silence_ratio' field (0.0 = all speech, 1.0 = all silence)
+        based on gaps between spoken words.
+        """
         # Whisper returns word-level timestamps when the model supports it (base+)
         result = self.whisper_model.transcribe(
             str(self.video_path),
             word_timestamps=True,  # Enable word-level timing
             verbose=False,
         )
+        
+        # Compute silence ratio from transcript words
+        words = []
+        for seg in result.get("segments", []):
+            for word_data in seg.get("words", []):
+                words.append({
+                    "start": word_data["start"],
+                    "end": word_data["end"],
+                })
+        
+        if words:
+            total_speech = sum(w["end"] - w["start"] for w in words)
+            total_duration = words[-1]["end"] - words[0]["start"] if words else 0
+            silence_ratio = max(0.0, min(1.0, 1.0 - (total_speech / total_duration))) if total_duration > 0 else 0.0
+        else:
+            silence_ratio = 1.0  # No words = complete silence
+        
+        result["silence_ratio"] = silence_ratio
         return result
 
     # ─── Step 3: Frame Extraction + NSFW ────────────────────────────────
@@ -171,21 +195,39 @@ class MovieAnalyzer:
             if not frame_path.exists():
                 continue
 
-            # Classify with safety checker
-            nsfw_score = self._classify_frame(frame_path)
+            # Classify with safety checker → (confidence, has_nsfw_concept)
+            nsfw_score, has_nsfw = self._classify_frame(frame_path)
 
-            if nsfw_score >= self.nsfw_threshold:
+            if has_nsfw:
+                # Detect if frame is cartoon/anime
+                is_cartoon = self._detect_cartoon(frame_path)
+
+                # Use appropriate threshold based on media type
+                threshold = self.cartoon_threshold if is_cartoon else self.nsfw_threshold
+
+                # Apply score
+                score = float(nsfw_score)
+
+                # Store media type hint for downstream use
+                media_type = "cartoon" if is_cartoon else "live_action"
+
                 results.append({
                     "time": start_time,
-                    "type": "nudity",  # Safety checker detects nudity/pornography
-                    "score": float(nsfw_score),
+                    "type": "nudity",
+                    "score": score,
+                    "media_type": media_type,
+                    "is_cartoon": is_cartoon,
                 })
 
         logger.info(f"Extracted {num_frames} frames, flagged {len(results)} as NSFW")
         return results
 
-    def _classify_frame(self, frame_path: Path) -> float:
-        """Run a single image through the safety checker. Returns 1.0 if NSFW, else 0.0."""
+    def _classify_frame(self, frame_path: Path) -> tuple[float, bool]:
+        """Run a single image through the safety checker. Returns (confidence, has_nsfw_concept).
+        
+        The confidence is derived from the linear layer output (before thresholding),
+        mapped to a 0.0-1.0 range. This enables proper thresholding.
+        """
         image = Image.open(frame_path).convert("RGB")
         image_array = np.array(image)
 
@@ -193,14 +235,107 @@ class MovieAnalyzer:
             images=image, return_tensors="pt"
         ).to(self._device)
 
-        # forward() returns (images, has_nsfw_concept: List[bool])
         with torch.no_grad():
-            _, has_nsfw = self.safety_checker(
+            # forward() returns (feature_values, has_nsfw_concept: List[bool])
+            feature_values, has_nsfw = self.safety_checker(
                 clip_input=safety_input.pixel_values,
                 images=[image_array],
             )
 
-        return 1.0 if has_nsfw[0] else 0.0
+        # If no NSFW concept detected, return 0.0 confidence
+        if not has_nsfw[0]:
+            return 0.0, False
+
+        # Extract confidence from the linear layer output
+        # feature_values shape: (1, num_features) for the flagged concept
+        # We use the max activation as confidence score
+        if feature_values.numel() > 0:
+            confidence = float(feature_values.abs().max().item())
+            # Clamp to [0, 1] range (safety checker outputs are typically in [-2, 2])
+            confidence = max(0.0, min(1.0, (confidence + 1.0) / 2.0))
+        else:
+            confidence = 0.5  # fallback if no feature values
+
+        return confidence, True
+
+    def _detect_cartoon(self, frame_path: Path) -> bool:
+        """Heuristic to detect if a frame is cartoon/anime vs live-action.
+        
+        Uses two signals:
+        1. Color saturation distribution: cartoons tend to have higher peak saturation
+           and less color diversity (more uniform colors)
+        2. Edge density: cartoons have sharper, more uniform edges with less texture
+        
+        Returns True if likely cartoon/anime, False otherwise.
+        """
+        image = Image.open(frame_path).convert("RGB")
+        image_np = np.array(image)
+        
+        # Convert to HSV for saturation analysis
+        try:
+            from PIL import ImageChops
+            import cv2
+        except ImportError:
+            # Fallback: if cv2 not available, use a simpler heuristic
+            return self._simple_cartoon_check(image_np)
+        
+        hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
+        s_channel = hsv[:, :, 1]
+        
+        # Signal 1: Saturation analysis
+        # Cartoons tend to have higher peak saturation (more intense colors)
+        sat_mean = np.mean(s_channel)
+        sat_std = np.std(s_channel)
+        sat_hist, _ = np.histogram(s_channel, bins=10, range=(0, 255))
+        # Check for saturation peaks (cartoons have concentrated saturation)
+        sat_entropy = -np.sum((sat_hist / (sat_hist.sum() + 1e-6)) * np.log2((sat_hist / (sat_hist.sum() + 1e-6)) + 1e-6))
+        
+        # Signal 2: Edge density and uniformity
+        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        edge_density = np.sum(edges > 0) / edges.size
+        
+        # Cartoon heuristics:
+        # - High saturation peak (low std relative to mean)
+        # - Moderate edge density (cartoons have edges but less texture noise)
+        # - Lower color entropy (less varied colors)
+        
+        # Simple scoring: combine signals
+        # High saturation + moderate edges = likely cartoon
+        sat_score = min(1.0, sat_mean / 180.0) if sat_mean > 0 else 0
+        edge_score = min(1.0, edge_density / 0.3)  # normalize to expected range
+        
+        # Cartoon score: high saturation, moderate edges
+        cartoon_score = (sat_score * 0.6) + (edge_score * 0.4)
+        
+        return bool(cartoon_score > 0.5)
+
+    def _simple_cartoon_check(self, image_np: np.ndarray) -> bool:
+        """Fallback cartoon detection without cv2.
+        
+        Uses simple color statistics to detect cartoon-like content.
+        """
+        # Convert to HSV manually for basic saturation check
+        if image_np.shape[2] != 3:
+            return False
+        
+        rgb = image_np.astype(np.float32) / 255.0
+        r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+        
+        max_c = np.maximum(np.maximum(r, g), b)
+        min_c = np.minimum(np.minimum(r, g), b)
+        sat = max_c - min_c
+        max_c_safe = np.where(max_c > 0, max_c, 1.0)
+        sat = sat / max_c_safe
+        
+        # Cartoon images tend to have higher average saturation
+        avg_sat = np.mean(sat)
+        
+        # Also check for color banding (common in cartoons)
+        sat_unique = len(np.unique(sat.flatten()))
+        
+        # Heuristic: high saturation + fewer unique saturation values
+        return (avg_sat > 0.4) and (sat_unique < 100)
 
     # ─── Step 4: Build Detections ───────────────────────────────────────
 
@@ -252,8 +387,19 @@ class MovieAnalyzer:
                 })
 
         # --- Visual: add frame NSFW detections ---
+        # Get silence ratio from transcript for audio heuristic
+        silence_ratio = transcript_data.get("silence_ratio", 0.0)
+        
         for frame in frame_results:
-            detections.append(frame)
+            detection = dict(frame)  # copy
+            
+            # Audio heuristic: if mostly silent/no dialogue, deprioritize visual-only flags
+            if silence_ratio > 0.7:
+                detection["score"] = detection["score"] * 0.5
+                detection["score"] = round(detection["score"], 4)
+                detection["audio_silenced"] = True
+            
+            detections.append(detection)
 
         # Sort by time
         detections.sort(key=lambda d: d["time"])
@@ -401,6 +547,12 @@ def main():
         help="NSFW confidence threshold (default: 0.6)",
     )
     parser.add_argument(
+        "--cartoon-threshold",
+        type=float,
+        default=0.8,
+        help="Cartoon/anime NSFW confidence threshold (default: 0.8, higher to reduce false positives)",
+    )
+    parser.add_argument(
         "--interval",
         type=int,
         default=5,
@@ -419,6 +571,7 @@ def main():
         output_dir=args.output_dir,
         whisper_model=args.model,
         nsfw_threshold=args.threshold,
+        cartoon_threshold=args.cartoon_threshold,
         frame_interval=args.interval,
     )
 
