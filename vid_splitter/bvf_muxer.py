@@ -159,6 +159,56 @@ def _build_packet(packet_type: int, packet_data: bytes, pts_ms: int) -> bytes:
     return header + packet_data
 
 
+def _build_segment_block(
+    segment_id: str,
+    video_packets: list[dict[str, Any]],
+    audio_packets: list[dict[str, Any]],
+    codec_video: int = CODEC_H264,
+    codec_audio: int = CODEC_AAC_LC,
+) -> bytes:
+    """Build a segment data block with real encoded packet data.
+
+    Parameters
+    ----------
+    segment_id : str
+        Segment identifier (must be <= 16 chars).
+    video_packets : list[dict]
+        List of video packet dicts, each with:
+        - "pts_ms" (int): presentation timestamp in milliseconds
+        - "data" (bytes): raw codec bitstream data (e.g. H.264 Annex B)
+    audio_packets : list[dict]
+        List of audio packet dicts, each with:
+        - "pts_ms" (int): presentation timestamp in milliseconds
+        - "data" (bytes): raw codec frame data (e.g. AAC ADTS, Opus)
+    codec_video : int
+        Video codec identifier (e.g. CODEC_H264).
+    codec_audio : int
+        Audio codec identifier (e.g. CODEC_AAC_LC).
+
+    Returns
+    -------
+    bytes
+        Complete segment data block: 32-byte header + video packets + audio packets.
+    """
+    block_header = _build_block_header(segment_id, codec_video, codec_audio)
+
+    # Pack all video packets
+    video_data = b""
+    for pkt in video_packets:
+        pts_ms = pkt.get("pts_ms", 0)
+        data = pkt.get("data", b"")
+        video_data += _build_packet(PACKET_VIDEO, data, pts_ms)
+
+    # Pack all audio packets
+    audio_data = b""
+    for pkt in audio_packets:
+        pts_ms = pkt.get("pts_ms", 0)
+        data = pkt.get("data", b"")
+        audio_data += _build_packet(PACKET_AUDIO, data, pts_ms)
+
+    return block_header + video_data + audio_data
+
+
 def _build_stub_segment_block(
     segment_id: str,
     codec_video: int = CODEC_H264,
@@ -168,6 +218,9 @@ def _build_stub_segment_block(
 
     Contains a block header + one video marker packet + one audio marker packet.
     Used when real segment data is not yet available.
+
+    .. deprecated::
+        Use :func:`_build_segment_block` with real packet data instead.
     """
     block_header = _build_block_header(segment_id, codec_video, codec_audio)
     # Marker video packet (1 byte of dummy data)
@@ -261,6 +314,10 @@ class BvfMuxer:
               - risk (str): "safe" or "mature"
               - action (str): "play", "swap", "skip", or "mute"
               - profile_segment_id (str, optional): target segment_id for swap/skip
+              - video_packets (list[dict], optional): real video packet data
+                each with {"pts_ms": int, "data": bytes}
+              - audio_packets (list[dict], optional): real audio packet data
+                each with {"pts_ms": int, "data": bytes}
         duration_seconds : float
             Total duration of the original video in seconds.
         profiles : dict
@@ -294,13 +351,23 @@ class BvfMuxer:
         )
         manifest_compressed = _compress_manifest(manifest_json)
 
-        # --- Step 2: Build stub segment data blocks ---
-        stub_blocks: list[bytes] = []
+        # --- Step 2: Build segment data blocks (real or stub) ---
+        segment_blocks: list[bytes] = []
         for seg in segments:
-            block = _build_stub_segment_block(
-                seg["id"], self.codec_video, self.codec_audio
-            )
-            stub_blocks.append(block)
+            video_packets = seg.get("video_packets")
+            audio_packets = seg.get("audio_packets")
+            if video_packets is not None and audio_packets is not None:
+                # Use real packet data
+                block = _build_segment_block(
+                    seg["id"], video_packets, audio_packets,
+                    self.codec_video, self.codec_audio
+                )
+            else:
+                # Fall back to stub for backward compatibility
+                block = _build_stub_segment_block(
+                    seg["id"], self.codec_video, self.codec_audio
+                )
+            segment_blocks.append(block)
 
         # --- Step 3: Compute layout ---
         # File header: 64 bytes
@@ -346,9 +413,9 @@ class BvfMuxer:
             f.write(manifest_compressed)
 
             # 4d. Write segment data blocks and record real offsets
-            for i, block in enumerate(stub_blocks):
+            for i, block in enumerate(segment_blocks):
                 seg = segments[i]
-                block_offset = blocks_offset + sum(len(b) for b in stub_blocks[:i])
+                block_offset = blocks_offset + sum(len(b) for b in segment_blocks[:i])
                 block_length = len(block)
 
                 # Backfill index entry with real offset
