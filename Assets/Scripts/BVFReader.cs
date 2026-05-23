@@ -317,7 +317,7 @@ public static class BVFReader
         while (position + 16 <= entry.DataLength)
         {
             var packetTypeAndReserved = reader.ReadUInt32();
-            var packetType = (byte)(packetTypeAndReserved >> 24);
+            var packetType = (byte)(packetTypeAndReserved & 0xFF);
             var packetSize = reader.ReadUInt32();
             reader.ReadUInt64();
             position += 16;

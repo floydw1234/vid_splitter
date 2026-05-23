@@ -1,32 +1,33 @@
 """
 Smart Branching Analyzer
-Scans a video file, detects mature content, and generates a smart_branch.json manifest.
+Scans a video file, detects mature content, and generates a .bvf container.
 
 Architecture:
   1. Whisper → timestamped transcript with word-level timing
   2. Frame extraction → 1 frame every 5 seconds via FFmpeg
   3. Safety checker → NSFW detection on extracted frames
   4. Segment merging → combine overlapping flags into time-bounded segments
-  5. Manifest output → smart_branch.json
+  5. BVF output → movie.bvf
 
 Usage:
   python analyze.py "path/to/movie.mp4" [--model base|tiny|medium] [--threshold 0.7]
 """
-import os
 import sys
-import json
 import argparse
 import logging
+import subprocess
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
-import torch
-import ffmpeg
-import whisper
-from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-from transformers import CLIPImageProcessor
 from PIL import Image
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from vid_splitter.bvf_muxer import BvfMuxer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -40,10 +41,30 @@ PROFANITY_LIST = [
 
 # Default profiles baked into every manifest
 DEFAULT_PROFILES = {
-    "child": {"age": 10, "gender": "any", "filters": ["nudity", "violence", "language", "fear"]},
-    "teen_m": {"age": 15, "gender": "male", "filters": ["nudity", "gore"]},
-    "teen_f": {"age": 15, "gender": "female", "filters": ["nudity", "violence"]},
-    "adult": {"age": 18, "gender": "any", "filters": []},
+    "child": {
+        "label": "Child (under 13)",
+        "age": 10,
+        "gender": "any",
+        "filters": ["nudity", "violence", "language", "fear", "gore"],
+    },
+    "teen_m": {
+        "label": "Teen male (13-17)",
+        "age": 15,
+        "gender": "male",
+        "filters": ["nudity", "gore"],
+    },
+    "teen_f": {
+        "label": "Teen female (13-17)",
+        "age": 15,
+        "gender": "female",
+        "filters": ["nudity", "violence"],
+    },
+    "adult": {
+        "label": "Adult (18+)",
+        "age": 18,
+        "gender": "any",
+        "filters": [],
+    },
 }
 
 # Tags that map to filter categories
@@ -67,6 +88,7 @@ class MovieAnalyzer:
         nsfw_threshold: float = 0.6,
         cartoon_threshold: float = 0.8,
         frame_interval: int = 5,
+        load_models: bool = True,
     ):
         self.video_path = Path(video_path).resolve()
         self.output_dir = Path(output_dir) if output_dir else self.video_path.parent
@@ -74,10 +96,20 @@ class MovieAnalyzer:
         self.nsfw_threshold = nsfw_threshold
         self.cartoon_threshold = cartoon_threshold
         self.frame_interval = frame_interval  # seconds between frame samples
+        self.last_bvf_path: Path | None = None
 
-        # --- Load models (cached) ---
-        logger.info(f"Loading Whisper model: {whisper_model}")
-        self.whisper_model = whisper.load_model(whisper_model)
+        if load_models:
+            self._load_models()
+
+    def _load_models(self) -> None:
+        """Load ML models lazily so demo/manual analyzer modes stay lightweight."""
+        import torch
+        import whisper
+        from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+        from transformers import CLIPImageProcessor
+
+        logger.info(f"Loading Whisper model: {self.whisper_model_name}")
+        self.whisper_model = whisper.load_model(self.whisper_model_name)
 
         logger.info("Loading NSFW safety checker...")
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -118,9 +150,12 @@ class MovieAnalyzer:
         # 6. Generate manifest
         manifest = self._build_manifest(segments, duration)
 
-        # 7. Save manifest
-        output_json = self._save_manifest(manifest)
-        logger.info(f"Manifest saved to: {output_json}")
+        self._attach_media_packets(manifest["segments"])
+
+        # 7. Save BVF container
+        output_bvf = self._save_bvf(manifest)
+        self.last_bvf_path = output_bvf
+        logger.info(f"BVF saved to: {output_bvf}")
 
         return manifest
 
@@ -128,8 +163,19 @@ class MovieAnalyzer:
 
     def _get_duration(self) -> float:
         """Get video duration via FFprobe."""
-        probe = ffmpeg.probe(str(self.video_path))
-        return float(probe["format"]["duration"])
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(self.video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return float(result.stdout.strip())
 
     # ─── Step 2: Transcription ──────────────────────────────────────────
 
@@ -173,7 +219,7 @@ class MovieAnalyzer:
         frames_dir.mkdir(parents=True, exist_ok=True)
 
         results = []
-        num_frames = int(duration / self.frame_interval)
+        num_frames = max(1, int(np.ceil(duration / self.frame_interval)))
 
         for i in range(num_frames):
             start_time = i * self.frame_interval
@@ -182,14 +228,11 @@ class MovieAnalyzer:
             # Extract single frame at exact timestamp
             try:
                 (
-                    ffmpeg
-                    .input(str(self.video_path), ss=start_time)
-                    .output(str(frame_path), vframes=1, format="image2")
-                    .overwrite_output()
-                    .run(quiet=True, capture_stdout=True, capture_stderr=True)
+                    self._extract_frame(start_time, frame_path)
                 )
-            except ffmpeg.Error as e:
-                logger.warning(f"Failed to extract frame at {start_time}s: {e.stderr.decode()}")
+            except subprocess.CalledProcessError as e:
+                stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+                logger.warning(f"Failed to extract frame at {start_time}s: {stderr}")
                 continue
 
             if not frame_path.exists():
@@ -205,8 +248,10 @@ class MovieAnalyzer:
                 # Use appropriate threshold based on media type
                 threshold = self.cartoon_threshold if is_cartoon else self.nsfw_threshold
 
-                # Apply score
+                # Apply threshold before forwarding visual detections downstream.
                 score = float(nsfw_score)
+                if score < threshold:
+                    continue
 
                 # Store media type hint for downstream use
                 media_type = "cartoon" if is_cartoon else "live_action"
@@ -222,6 +267,22 @@ class MovieAnalyzer:
         logger.info(f"Extracted {num_frames} frames, flagged {len(results)} as NSFW")
         return results
 
+
+    def _extract_frame(self, start_time: float, frame_path: Path) -> None:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss", str(start_time),
+                "-i", str(self.video_path),
+                "-frames:v", "1",
+                "-f", "image2",
+                str(frame_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
     def _classify_frame(self, frame_path: Path) -> tuple[float, bool]:
         """Run a single image through the safety checker. Returns (confidence, has_nsfw_concept).
         
@@ -234,6 +295,8 @@ class MovieAnalyzer:
         safety_input = self.feature_extractor(
             images=image, return_tensors="pt"
         ).to(self._device)
+
+        import torch
 
         with torch.no_grad():
             # forward() returns (feature_values, has_nsfw_concept: List[bool])
@@ -362,8 +425,8 @@ class MovieAnalyzer:
                     "end": word_data["end"],
                 })
 
-        # Bin words into frame-interval buckets
-        num_buckets = int(duration / self.frame_interval)
+        # Bin words into frame-interval buckets. Include a trailing partial bucket.
+        num_buckets = max(1, int(np.ceil(duration / self.frame_interval)))
         for bucket_idx in range(num_buckets):
             bucket_start = bucket_idx * self.frame_interval
             bucket_end = bucket_start + self.frame_interval
@@ -394,6 +457,7 @@ class MovieAnalyzer:
             detection = dict(frame)  # copy
             
             # Audio heuristic: if mostly silent/no dialogue, deprioritize visual-only flags
+            detection["audio_silenced"] = False
             if silence_ratio > 0.7:
                 detection["score"] = detection["score"] * 0.5
                 detection["score"] = round(detection["score"], 4)
@@ -520,13 +584,108 @@ class MovieAnalyzer:
             "segments": segments,
         }
 
+
+    def analyze_demo_branch(self) -> dict:
+        """Create a deterministic branchable BVF without ML model dependencies.
+
+        This is intended for local end-to-end verification. It probes the input
+        video, marks the middle third as mature language content, embeds remuxed
+        media bytes for each segment, and writes the normal BVF container.
+        """
+        logger.info(f"Running demo branch analysis: {self.video_path}")
+        if not self.video_path.exists():
+            raise FileNotFoundError(f"Video not found: {self.video_path}")
+
+        duration = self._get_duration()
+        one_third = duration / 3.0
+        segments = [
+            {
+                "id": "seg_001",
+                "start_time": 0.0,
+                "end_time": round(one_third, 2),
+                "tags": [],
+                "risk": "safe",
+                "action": "play",
+            },
+            {
+                "id": "seg_002",
+                "start_time": round(one_third, 2),
+                "end_time": round(one_third * 2, 2),
+                "tags": ["language"],
+                "risk": "mature",
+                "action": "skip",
+            },
+            {
+                "id": "seg_003",
+                "start_time": round(one_third * 2, 2),
+                "end_time": round(duration, 2),
+                "tags": [],
+                "risk": "safe",
+                "action": "play",
+            },
+        ]
+        segments = [s for s in segments if s["end_time"] > s["start_time"]]
+        for i, seg in enumerate(segments):
+            seg["id"] = f"seg_{i + 1:03d}"
+
+        manifest = self._build_manifest(segments, duration)
+        self._attach_media_packets(manifest["segments"])
+        output_bvf = self._save_bvf(manifest)
+        self.last_bvf_path = output_bvf
+        logger.info(f"BVF saved to: {output_bvf}")
+        return manifest
+
+    def _attach_media_packets(self, segments: list[dict]) -> None:
+        """Embed MPEG-TS media payloads for every segment in-place."""
+        with tempfile.TemporaryDirectory(prefix="bvf_analyzer_segments_") as tmp:
+            tmp_dir = Path(tmp)
+            for seg in segments:
+                segment_path = tmp_dir / f"{seg['id']}.ts"
+                self._remux_segment(seg["start_time"], seg["end_time"], segment_path)
+                seg["video_packets"] = [
+                    {
+                        "pts_ms": int(seg["start_time"] * 1000),
+                        "data": segment_path.read_bytes(),
+                    }
+                ]
+                seg["audio_packets"] = []
+
+    def _remux_segment(self, start_time: float, end_time: float, output_path: Path) -> None:
+        duration = max(0.001, end_time - start_time)
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss", f"{start_time:.3f}",
+                "-i", str(self.video_path),
+                "-t", f"{duration:.3f}",
+                "-map", "0:v:0",
+                "-map", "0:a?",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-f", "mpegts",
+                str(output_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
     # ─── Step 7: Save ───────────────────────────────────────────────────
 
-    def _save_manifest(self, manifest: dict) -> Path:
-        output_json = self.output_dir / f"{self.video_path.stem}_branch.json"
-        with open(output_json, "w") as f:
-            json.dump(manifest, f, indent=2)
-        return output_json
+    def _save_bvf(self, manifest: dict) -> Path:
+        """Write analyzer output into a BVF container."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        output_bvf = self.output_dir / f"{self.video_path.stem}.bvf"
+        muxer = BvfMuxer(
+            movie_id=manifest["movie_id"],
+            title=self.video_path.stem,
+        )
+        return muxer.write_bvf(
+            output_path=output_bvf,
+            segments=manifest["segments"],
+            duration_seconds=manifest["duration_seconds"],
+            profiles=manifest["profiles"],
+        )
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────
@@ -563,7 +722,11 @@ def main():
         default=None,
         help="Output directory (default: same as video file)",
     )
-
+    parser.add_argument(
+        "--demo-branch",
+        action="store_true",
+        help="Create a deterministic safe/mature/safe BVF without loading ML models",
+    )
     args = parser.parse_args()
 
     analyzer = MovieAnalyzer(
@@ -573,11 +736,14 @@ def main():
         nsfw_threshold=args.threshold,
         cartoon_threshold=args.cartoon_threshold,
         frame_interval=args.interval,
+        load_models=not args.demo_branch,
     )
 
     try:
-        manifest = analyzer.analyze()
+        manifest = analyzer.analyze_demo_branch() if args.demo_branch else analyzer.analyze()
         print(f"\n✅ Analysis complete!")
+        if analyzer.last_bvf_path:
+            print(f"   BVF: {analyzer.last_bvf_path}")
         print(f"   Segments: {len(manifest['segments'])}")
         print(f"   Mature: {sum(1 for s in manifest['segments'] if s['risk'] == 'mature')}")
         print(f"   Safe: {sum(1 for s in manifest['segments'] if s['risk'] == 'safe')}")

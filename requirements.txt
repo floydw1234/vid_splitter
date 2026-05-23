@@ -9,3 +9,4 @@ accelerate
 diffusers
 safety-checker
 Pillow
+zstandard

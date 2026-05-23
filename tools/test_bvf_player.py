@@ -89,8 +89,18 @@ def _create_test_bvf(
                 "end_time": 345.0,
                 "tags": ["violence", "gore"],
                 "risk": "mature",
+                "action": "swap",
+                "profile_segment_id": "filler_001",
+            },
+            {
+                "id": "filler_001",
+                "start_time": 0.0,
+                "end_time": 45.0,
+                "tags": [],
+                "risk": "safe",
                 "action": "play",
-                "profile_segment_id": "seg_002",
+                "profile_segment_id": "filler_001",
+                "is_filler": True,
             },
             {
                 "id": "seg_003",
@@ -146,7 +156,7 @@ class TestParseFileHeader(TestCase):
 
     def test_valid_header(self):
         """Test parsing a valid 64-byte header."""
-        data = FILE_MAGIC + struct.pack("<H H I Q Q Q Q I Q I", 1, 0, 64, 64, 128, 64, 3, 300000, 0)
+        data = FILE_MAGIC + struct.pack("<H H I Q Q Q Q I Q I", 1, 0, 0, 64, 64, 128, 64, 3, 300000, 0)
         header = _parse_file_header(data)
 
         self.assertEqual(header["magic"], "BVF\x01")
@@ -157,7 +167,7 @@ class TestParseFileHeader(TestCase):
 
     def test_invalid_magic(self):
         """Test that invalid magic bytes raise an error."""
-        data = b"XXXX" + struct.pack("<H H I Q Q Q Q I Q I", 1, 0, 0, 64, 64, 128, 64, 3, 300000, 0)
+        data = b"XXXX\x00\x00\x00\x00" + struct.pack("<H H I Q Q Q Q I Q I", 1, 0, 0, 64, 64, 128, 64, 3, 300000, 0)
         header = _parse_file_header(data)
         self.assertEqual(header["magic"], "XXXX")
 
@@ -393,10 +403,9 @@ class TestExtractSegment(TestCase):
             success = player.extract_segment("seg_001", output_path)
             self.assertTrue(success)
 
-            # Extracted size should be data_length minus block header (32 bytes)
-            expected_size = seg_entry["data_length"] - BLOCK_HEADER_SIZE
+            # Stub segments contain one video marker byte and one audio marker byte.
             actual_size = os.path.getsize(output_path)
-            self.assertEqual(actual_size, expected_size)
+            self.assertEqual(actual_size, 2)
         finally:
             if os.path.exists(output_path):
                 os.unlink(output_path)
@@ -417,6 +426,12 @@ class TestCLIParsing(TestCase):
 
         args = parser.parse_args(["test.bvf", "--profile", "teen"])
         self.assertEqual(args.profile, "teen")
+
+        args = parser.parse_args(["test.bvf", "--profile", "teen_m"])
+        self.assertEqual(args.profile, "teen_m")
+
+        args = parser.parse_args(["test.bvf", "--profile", "teen_f"])
+        self.assertEqual(args.profile, "teen_f")
 
         args = parser.parse_args(["test.bvf", "--profile", "child"])
         self.assertEqual(args.profile, "child")
@@ -482,8 +497,7 @@ class TestPlaybackInfo(TestCase):
 
         info = player.get_playback_info()
 
-        # Each segment is 300000ms, 3 segments = 900000ms
-        self.assertEqual(info["total_duration_ms"], 900000)
+        self.assertEqual(info["total_duration_ms"], 600000)
 
 
 class TestCleanup(TestCase):

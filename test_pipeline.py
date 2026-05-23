@@ -4,16 +4,15 @@ Validates the full pipeline without needing a real video file.
 
 Tests:
   1. Analyzer manifest generation (with a synthetic manifest)
-  2. Manifest file I/O (save/load round-trip)
+  2. Analyzer BVF output
   3. Segment merging logic (gaps, overlaps, multi-tag)
 
 Usage:
   python test_pipeline.py
 """
-import json
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 # ─── Test 1: Analyzer Manifest Generation ─────────────────────────────
 
@@ -102,21 +101,24 @@ def test_analyzer_manifest():
     print("✅ Test 1 passed\n")
 
 
-# ─── Test 2: Manifest File I/O ────────────────────────────────────────
 
-def test_manifest_io():
-    """Test saving and loading a manifest file."""
-    print("🧪 Test 2: Manifest file I/O")
+# ─── Test 2: Analyzer BVF Output ──────────────────────────────────────
+
+def test_analyzer_bvf_output():
+    """Test saving analyzer manifest data into a BVF file."""
+    print("🧪 Test 2: Analyzer BVF output")
 
     try:
         import ffmpeg
         import whisper
+        import zstandard
     except ImportError:
         print("  ⏭️  Skipped (deps not installed)")
         return
 
     sys.path.insert(0, str(Path(__file__).parent / "analyzer"))
     from analyze import MovieAnalyzer
+    from vid_splitter.bvf_muxer import BvfMuxer
 
     mock_video = Path("/tmp/test_movie.mp4")
 
@@ -136,26 +138,21 @@ def test_manifest_io():
         }]
 
         manifest = analyzer._build_manifest(segments, 60.0)
-        output_path = analyzer._save_manifest(manifest)
+        output_path = analyzer._save_bvf(manifest)
 
-        assert output_path.exists(), f"Manifest file not created: {output_path}"
+        assert output_path.exists(), f"BVF file not created: {output_path}"
 
-        # Load it back
-        with open(output_path) as f:
-            loaded = json.load(f)
+        parsed = BvfMuxer.read_bvf(output_path)
+        assert parsed["manifest"]["movie_id"] == "test_movie"
+        assert parsed["manifest"]["duration_ms"] == 60000
+        assert len(parsed["manifest"]["segments"]) == 1
+        assert parsed["segments"][0]["segment_id"] == "seg_001"
+        print("  ✅ BVF saved and read back correctly")
 
-        assert loaded["movie_id"] == "test_movie"
-        assert loaded["duration_seconds"] == 60.0
-        assert len(loaded["segments"]) == 1
-        assert loaded["segments"][0]["risk"] == "safe"
-        print("  ✅ Manifest saved and loaded correctly")
-
-        # Cleanup
         output_path.unlink()
         print("  ✅ Cleanup successful")
 
     print("✅ Test 2 passed\n")
-
 
 # ─── Test 3: Segment Merging Edge Cases ───────────────────────────────
 
@@ -402,7 +399,7 @@ def main():
 
     tests = [
         test_analyzer_manifest,
-        test_manifest_io,
+        test_analyzer_bvf_output,
         test_segment_merging_edge_cases,
         test_cartoon_threshold,
         test_audio_heuristic,

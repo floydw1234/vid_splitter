@@ -60,32 +60,38 @@ public class ProfileResolver
         if (config?.UserProfiles != null &&
             config.UserProfiles.TryGetValue(userId, out var stored))
         {
-            // 1. Explicit override wins
-            if (!string.IsNullOrEmpty(stored.ProfileOverride) &&
-                manifest.Profiles.ContainsKey(stored.ProfileOverride))
-                return stored.ProfileOverride;
+            // 1. Explicit override wins when the BVF contains that profile.
+            if (!string.IsNullOrEmpty(stored.ProfileOverride))
+                return SelectAvailableBvfProfile(manifest.Profiles, stored.ProfileOverride);
 
-            // 2. Auto-resolve from birthday + sex
+            // 2. Auto-resolve from birthday + sex, then map to an available BVF profile.
             if (!string.IsNullOrEmpty(stored.Birthday) &&
                 DateOnly.TryParse(stored.Birthday, out var dob))
             {
                 var age = CalculateAge(dob);
-                return ResolveFromAgeSex(age, stored.Sex ?? "unset");
+                return SelectAvailableBvfProfile(manifest.Profiles, ResolveFromAgeSex(age, stored.Sex ?? "unset"));
             }
         }
 
-        // 3. Fall back to the first profile in the manifest, or "adult"
-        if (manifest.Profiles.ContainsKey("adult"))
-            return "adult";
+        // 3. Honor the configured default when available, otherwise pick a stable fallback.
+        return SelectAvailableBvfProfile(manifest.Profiles, config?.DefaultProfile);
+    }
 
-        if (manifest.Profiles.ContainsKey("teen"))
+    private static string SelectAvailableBvfProfile(Dictionary<string, BVFProfile> profiles, string? preferred)
+    {
+        if (!string.IsNullOrEmpty(preferred) && profiles.ContainsKey(preferred))
+            return preferred;
+
+        if ((preferred == "teen_m" || preferred == "teen_f") && profiles.ContainsKey("teen"))
             return "teen";
 
-        if (manifest.Profiles.ContainsKey("child"))
-            return "child";
+        foreach (var candidate in new[] { "adult", "teen_m", "teen_f", "teen", "child" })
+        {
+            if (profiles.ContainsKey(candidate))
+                return candidate;
+        }
 
-        // Return the first available profile key
-        return manifest.Profiles.Keys.FirstOrDefault() ?? "adult";
+        return profiles.Keys.FirstOrDefault() ?? "adult";
     }
 
     /// <summary>

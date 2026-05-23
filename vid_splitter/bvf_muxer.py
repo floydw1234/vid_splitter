@@ -154,7 +154,7 @@ def _build_packet(packet_type: int, packet_data: bytes, pts_ms: int) -> bytes:
     Packet layout:
       packet_type (u8) + reserved (u24) + packet_size (u32) + pts_ms (u64) + packet_data (N bytes)
     """
-    header = struct.pack("<I I", packet_type << 24 | 0, len(packet_data))
+    header = struct.pack("<I I", packet_type, len(packet_data))
     header += struct.pack("<Q", pts_ms)
     return header + packet_data
 
@@ -405,7 +405,7 @@ class BvfMuxer:
                     segment_id=seg["id"],
                     data_offset=0,  # placeholder — backfilled below
                     data_length=0,  # placeholder
-                    duration_ms=int((seg["end_time"] - seg["start_time"]) * 1000),
+                    duration_ms=self._segment_duration_ms(seg),
                 )
                 f.write(entry)
 
@@ -424,9 +424,7 @@ class BvfMuxer:
                     segment_id=seg["id"],
                     data_offset=block_offset,
                     data_length=block_length,
-                    duration_ms=int(
-                        (seg["end_time"] - seg["start_time"]) * 1000
-                    ),
+                    duration_ms=self._segment_duration_ms(seg),
                 )
                 f.write(entry)
 
@@ -435,6 +433,14 @@ class BvfMuxer:
                 f.write(block)
 
         return output_path
+
+    @staticmethod
+    def _segment_duration_ms(seg: dict[str, Any]) -> int:
+        if "start_time" in seg and "end_time" in seg:
+            return int((seg["end_time"] - seg["start_time"]) * 1000)
+        if seg.get("start_ms") is not None and seg.get("end_ms") is not None:
+            return int(seg["end_ms"] - seg["start_ms"])
+        return 0
 
     def _build_manifest_segments(
         self,
@@ -448,8 +454,12 @@ class BvfMuxer:
 
         for seg in segments:
             seg_id = seg["id"]
-            start_ms = int(seg["start_time"] * 1000)
-            end_ms = int(seg["end_time"] * 1000)
+            if "start_ms" in seg or "end_ms" in seg:
+                start_ms = seg.get("start_ms")
+                end_ms = seg.get("end_ms")
+            else:
+                start_ms = int(seg["start_time"] * 1000)
+                end_ms = int(seg["end_time"] * 1000)
             tags = seg.get("tags", [])
             risk = seg.get("risk", "safe")
             action = seg.get("action", "play")
@@ -458,13 +468,28 @@ class BvfMuxer:
             _risk_to_int(risk)
             _action_to_int(action)
 
-            # Build per-profile profile entry
-            profile_entries: dict[str, Any] = {}
-            for pname in profile_names:
-                profile_entries[pname] = {
-                    "action": action,
-                    "segment_id": profile_segment_id,
-                }
+            if "profiles" in seg:
+                profile_entries = dict(seg["profiles"])
+                for profile_data in profile_entries.values():
+                    _action_to_int(profile_data.get("action", "play"))
+            else:
+                # Build per-profile entries from each profile's filters. Profiles
+                # that do not filter this segment's tags play the original segment.
+                profile_entries = {}
+                tag_set = set(tags)
+                for pname in profile_names:
+                    filters = set(profiles.get(pname, {}).get("filters", []))
+                    should_filter = risk != "safe" and (not tag_set or bool(tag_set & filters))
+                    resolved_action = action if should_filter else "play"
+                    resolved_segment_id = (
+                        profile_segment_id
+                        if resolved_action in {"swap", "skip"}
+                        else seg_id
+                    )
+                    profile_entries[pname] = {
+                        "action": resolved_action,
+                        "segment_id": resolved_segment_id,
+                    }
 
             entry: dict[str, Any] = {
                 "id": seg_id,
@@ -474,6 +499,8 @@ class BvfMuxer:
                 "risk": risk,
                 "profiles": profile_entries,
             }
+            if seg.get("is_filler", False):
+                entry["is_filler"] = True
             manifest_segments.append(entry)
 
         return manifest_segments

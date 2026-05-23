@@ -359,9 +359,9 @@ class TestBuildPacket:
     def test_video_packet(self):
         data = b"\xde\xad\xbe\xef"
         packet = _build_packet(PACKET_VIDEO, data, 1234)
-        # packet_type << 24 | 0 = 0x01000000
+        # packet_type + reserved = 0x00000001
         ptype, psize = struct.unpack("<I I", packet[:8])
-        assert ptype == 0x01000000
+        assert ptype == 0x00000001
         assert psize == 4
         pts = struct.unpack("<Q", packet[8:16])[0]
         assert pts == 1234
@@ -370,7 +370,7 @@ class TestBuildPacket:
     def test_audio_packet(self):
         packet = _build_packet(PACKET_AUDIO, b"\x00\x01", 0)
         ptype, psize = struct.unpack("<I I", packet[:8])
-        assert ptype == 0x02000000
+        assert ptype == 0x00000002
         assert psize == 2
 
     def test_empty_data(self):
@@ -427,15 +427,15 @@ class TestBuildStubSegmentBlock:
         block = _build_stub_segment_block("seg_001")
         # After block header (32 bytes), there should be a video packet
         video_packet = block[32:]
-        # Find the audio packet start by looking for 0x02000000
+        # Find the audio packet start by looking for 0x00000002
         ptype, _ = struct.unpack("<I I", video_packet[:8])
-        assert ptype == 0x01000000  # video marker
+        assert ptype == 0x00000001  # video marker
 
     def test_contains_audio_packet(self):
         block = _build_stub_segment_block("seg_001")
         # The block has header + video_packet + audio_packet
-        # Find audio packet by scanning for 0x02000000
-        assert b"\x00\x00\x00\x02" in block  # PACKET_AUDIO << 24 packed as <I
+        # Find audio packet by scanning for 0x00000002
+        assert b"\x02\x00\x00\x00" in block  # PACKET_AUDIO followed by reserved bytes
 
     def test_custom_codecs(self):
         block = _build_stub_segment_block("seg_001", codec_video=CODEC_AV1, codec_audio=CODEC_OPUS)
@@ -828,10 +828,10 @@ class TestBuildSegmentBlock:
             CODEC_H264,
             CODEC_AAC_LC,
         )
-        # After header, find video packet type (0x01 << 24 = 0x01000000)
+        # After header, find video packet type (0x01 plus reserved bytes = 0x00000001)
         video_start = BLOCK_HEADER_SIZE
         ptype = struct.unpack("<I", block[video_start:video_start+4])[0]
-        assert ptype == 0x01000000
+        assert ptype == 0x00000001
 
     def test_audio_packets_included(self):
         block = _build_segment_block(
@@ -845,7 +845,7 @@ class TestBuildSegmentBlock:
         # Video packet: 4(type) + 4(size) + 8(pts) + 1(data) = 17 bytes
         audio_start = BLOCK_HEADER_SIZE + 17
         ptype = struct.unpack("<I", block[audio_start:audio_start+4])[0]
-        assert ptype == 0x02000000  # PACKET_AUDIO << 24
+        assert ptype == 0x00000002  # PACKET_AUDIO plus reserved bytes
 
     def test_custom_codecs(self):
         block = _build_segment_block(
@@ -876,7 +876,7 @@ class TestBuildSegmentBlock:
         offset = 0
         while offset < len(data):
             ptype = struct.unpack("<I", data[offset:offset+4])[0]
-            if ptype == 0x01000000:
+            if ptype == 0x00000001:
                 count += 1
                 psize = struct.unpack("<I", data[offset+4:offset+8])[0]
                 pts = struct.unpack("<Q", data[offset+8:offset+16])[0]
@@ -996,7 +996,7 @@ class TestWriteBvfWithRealData:
         # First 4 bytes should be SEG\x00
         assert block_data[:4] == BLOCK_MAGIC
         # After 32-byte block header, first packet should be video (type 0x01)
-        assert struct.unpack("<I", block_data[32:36])[0] == 0x01000000
+        assert struct.unpack("<I", block_data[32:36])[0] == 0x00000001
 
     def test_mixed_stub_and_real(self, tmp_path):
         """Verify segments can mix real and stub blocks."""

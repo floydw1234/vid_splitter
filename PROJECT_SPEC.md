@@ -203,7 +203,6 @@ vid_splitter/
 ├── BVF_SPEC.md               # Branched Video Format specification (v1.0 draft)
 ├── requirements.txt
 ├── test_pipeline.py
-├── play.py                   # Rapid testing tool for _branch.json (legacy format)
 ├── .gitignore
 │
 ├── analyzer/
@@ -219,7 +218,7 @@ vid_splitter/
 │   │   ├── PluginConfiguration.cs   # UserBranchProfile + Dictionary<string, UserBranchProfile>
 │   │   └── configPage.html            # User profile table with live resolution
 │   ├── Models/
-│   │   └── BranchManifest.cs  # C# types for BVF manifest schema
+│   │   └── BranchManifest.cs  # normalized branch manifest view
 │   ├── ManifestScanner.cs     # Scans library for .bvf files
 │   ├── BVFReader.cs           # Parses BVF binary format (header + index + manifest)
 │   ├── ProfileResolver.cs     # User → profile mapping (birthday+sex override system)
@@ -239,7 +238,7 @@ vid_splitter/
 * [x] Segment merging with gap filling
 * [x] Keyframe-aligned segment boundaries
 * [ ] Phase 1b: `analyzer/marlin_analyze.py` alternative analyzer path with Marlin-2B dense captioning and timestamped risk tags
-* [ ] BVF muxer integration (write `.bvf` instead of JSON sidecar)
+* [x] BVF muxer integration (write `.bvf` from analyzer output)
 * [ ] Test with real video file
 
 ### Phase 2: C# Plugin Skeleton ✅
@@ -253,8 +252,8 @@ vid_splitter/
 * [ ] Build and test on Jellyfin server
 
 ### Phase 3: BVF Toolchain
-* [ ] `bvf_muxer.py` — takes `movie.mp4` + `movie_branch.json` + fillers → writes `movie.bvf`
-* [ ] `bvf_player.py` — reference player: reads `.bvf`, resolves profile, plays via ffplay
+* [x] `bvf_muxer.py` — writes `.bvf` containers from analyzer segments
+* [x] `bvf_player.py` — reference player: reads `.bvf`, resolves profile, plays via ffplay
 * [ ] Keyframe alignment verification tool
 * [ ] BVF file validation tool
 

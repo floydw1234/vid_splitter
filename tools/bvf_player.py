@@ -20,6 +20,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,7 @@ def _parse_file_header(data: bytes) -> dict[str, Any]:
     ) = struct.unpack("<8s H H I Q Q Q Q I Q I", data)
 
     return {
-        "magic": magic.decode("ascii"),
+        "magic": magic.decode("ascii").rstrip("\x00"),
         "version_major": version_major,
         "version_minor": version_minor,
         "flags": flags,
@@ -128,23 +129,26 @@ class BVFPlayer:
     to temporary files, and plays them via ffplay in the correct order.
     """
 
-    SUPPORTED_PROFILES = ("adult", "teen", "child")
+    SUPPORTED_PROFILES = ("adult", "teen", "teen_m", "teen_f", "child")
 
     def __init__(
         self,
         bvf_path: str | Path,
-        profile: str = "adult",
+        profile: str | None = None,
+        user_data: dict[str, Any] | None = None,
         verbose: bool = False,
     ) -> None:
         """Load and parse a BVF file.
 
         Args:
             bvf_path: Path to the .bvf file.
-            profile: Viewer profile — one of 'adult', 'teen', 'child'.
+            profile: Optional viewer profile key from the BVF manifest.
+            user_data: Optional user JSON data used to resolve a profile.
             verbose: Print detailed information to stdout.
         """
         self.bvf_path = Path(bvf_path).resolve()
         self.profile = profile
+        self.user_data = user_data or {}
         self.verbose = verbose
 
         if not self.bvf_path.exists():
@@ -157,6 +161,7 @@ class BVFPlayer:
         self.header = self._parse_header()
         self.segments = self._parse_index()
         self.manifest = self._parse_manifest()
+        self.profile = self._resolve_profile(self.profile, self.user_data)
 
         self._playback_sequence: list[dict[str, Any]] | None = None
         self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -238,6 +243,50 @@ class BVFPlayer:
     # Profile resolution
     # ------------------------------------------------------------------
 
+    def _resolve_profile(self, explicit_profile: str | None, user_data: dict[str, Any]) -> str:
+        profiles = self.manifest.get("profiles", {})
+
+        if explicit_profile:
+            return self._select_available_profile(explicit_profile, profiles)
+
+        preferred = self._profile_from_user_data(user_data)
+        return self._select_available_profile(preferred, profiles)
+
+    def _profile_from_user_data(self, user_data: dict[str, Any]) -> str | None:
+        user = user_data.get("user", user_data)
+        override = user.get("profile_override") or user.get("profile")
+        if override:
+            return str(override)
+
+        birthday = user.get("birthday") or user.get("date_of_birth")
+        sex = str(user.get("sex") or user.get("gender") or "unset").lower()
+        if birthday:
+            try:
+                born = date.fromisoformat(str(birthday))
+            except ValueError:
+                born = None
+            if born is not None:
+                today = date.today()
+                age = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+                if age < 13:
+                    return "child"
+                if age < 18:
+                    return "teen_f" if sex == "female" else "teen_m"
+                return "adult"
+
+        return user_data.get("default_profile") or "adult"
+
+    @staticmethod
+    def _select_available_profile(preferred: str | None, profiles: dict[str, Any]) -> str:
+        if preferred and preferred in profiles:
+            return preferred
+        if preferred in {"teen_m", "teen_f"} and "teen" in profiles:
+            return "teen"
+        for candidate in ("adult", "teen_m", "teen_f", "teen", "child"):
+            if candidate in profiles:
+                return candidate
+        return next(iter(profiles), preferred or "adult")
+
     def resolve_playback_sequence(self) -> list[dict[str, Any]]:
         """Walk manifest segments and resolve the playback sequence.
 
@@ -261,7 +310,6 @@ class BVFPlayer:
         if self._playback_sequence is not None:
             return self._playback_sequence
 
-        profile_filter = set(self.manifest.get("profiles", {}).get(self.profile, {}).get("filters", []))
         segments = self.manifest.get("segments", [])
         index_map = {s["segment_id"]: s for s in self.segments}
 
@@ -354,10 +402,30 @@ class BVFPlayer:
         if len(raw) == 0:
             return False
 
-        # Skip the 32-byte block header to get raw packet data
+        payload = self._extract_packet_payloads(raw)
+        if not payload:
+            return False
+
         output = Path(output_path)
-        output.write_bytes(raw[BLOCK_HEADER_SIZE:])
+        output.write_bytes(payload)
         return True
+
+    def _extract_packet_payloads(self, raw: bytes, packet_type_filter: int | None = None) -> bytes:
+        output_packets: list[bytes] = []
+        pos = BLOCK_HEADER_SIZE
+        while pos < len(raw):
+            if pos + PACKET_HEADER_SIZE > len(raw):
+                break
+            packet_type = raw[pos]
+            packet_size = struct.unpack_from("<I", raw, pos + 4)[0]
+            packet_start = pos + PACKET_HEADER_SIZE
+            packet_end = packet_start + packet_size
+            if packet_end > len(raw):
+                break
+            if packet_type_filter is None or packet_type == packet_type_filter:
+                output_packets.append(raw[packet_start:packet_end])
+            pos = packet_end
+        return b"".join(output_packets)
 
     def extract_video_only(
         self,
@@ -391,36 +459,56 @@ class BVFPlayer:
         if len(raw) == 0:
             return False
 
-        # Parse packets and keep only video packets
-        output_packets: list[bytes] = []
-        pos = BLOCK_HEADER_SIZE  # skip block header
-
-        while pos < len(raw):
-            if pos + PACKET_HEADER_SIZE > len(raw):
-                break
-
-            packet_type = raw[pos]
-            # reserved = raw[pos + 1:pos + 4]  # 3 bytes, ignored
-            packet_size = struct.unpack_from("<I", raw, pos + 4)[0]
-            # pts_ms = struct.unpack_from("<Q", raw, pos + 8)[0]
-
-            if pos + PACKET_HEADER_SIZE + packet_size > len(raw):
-                break
-
-            packet_data = raw[pos + PACKET_HEADER_SIZE : pos + PACKET_HEADER_SIZE + packet_size]
-
-            if packet_type == PACKET_VIDEO:
-                output_packets.append(packet_data)
-
-            pos += PACKET_HEADER_SIZE + packet_size
-
+        payload = self._extract_packet_payloads(raw, packet_type_filter=PACKET_VIDEO)
         output = Path(output_path)
-        output.write_bytes(b"".join(output_packets))
-        return len(output_packets) > 0
+        output.write_bytes(payload)
+        return bool(payload)
 
     # ------------------------------------------------------------------
     # Playback
     # ------------------------------------------------------------------
+
+    def export(self, output_path: str | Path) -> Path:
+        """Write the resolved playback sequence to one remuxed media file."""
+        sequence = self.resolve_playback_sequence()
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.TemporaryDirectory(prefix="bvf_export_") as tmp:
+            tmp_dir = Path(tmp)
+            concat_lines: list[str] = []
+            for i, entry in enumerate(sequence):
+                segment_path = tmp_dir / f"seg_{i:03d}.ts"
+                if entry["action"] == "mute":
+                    success = self.extract_video_only(entry["target_id"], segment_path)
+                else:
+                    success = self.extract_segment(entry["target_id"], segment_path)
+                if not success:
+                    if self.verbose:
+                        print(f"[BVF] WARNING: failed to extract {entry['target_id']}")
+                    continue
+                concat_lines.append(f"file '{segment_path}'")
+
+            if not concat_lines:
+                output.write_bytes(b"")
+                return output
+
+            concat_path = tmp_dir / "concat.txt"
+            concat_path.write_text("\n".join(concat_lines), encoding="utf-8")
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", str(concat_path),
+                    "-c", "copy",
+                    str(output),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        return output
 
     def play(
         self,
@@ -631,9 +719,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--profile",
-        choices=BVFPlayer.SUPPORTED_PROFILES,
-        default="adult",
-        help="Viewer profile (default: adult)",
+        default=None,
+        help="Viewer profile override (default: resolve from --user-json, then adult)",
+    )
+    parser.add_argument(
+        "--user-json",
+        default=None,
+        help="Path to user data JSON with birthday/sex/profile_override",
     )
     parser.add_argument(
         "--list",
@@ -650,6 +742,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Seek to position in seconds during playback",
+    )
+    parser.add_argument(
+        "--export",
+        default=None,
+        help="Write the resolved stream to a remuxed media file instead of launching ffplay",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -669,10 +766,16 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    user_data = None
+    if args.user_json:
+        with open(args.user_json, "r", encoding="utf-8") as f:
+            user_data = json.load(f)
+
     try:
         player = BVFPlayer(
             bvf_path=args.bvf_file,
             profile=args.profile,
+            user_data=user_data,
             verbose=args.verbose,
         )
     except (FileNotFoundError, ValueError) as e:
@@ -685,18 +788,24 @@ def main() -> None:
         info = player.get_playback_info()
 
         print(f"\nTitle: {info['title']}")
-        print(f"Profile: {args.profile}")
+        print(f"Profile: {player.profile}")
         print(f"Total segments: {info['total_segments']}")
         print(f"Total duration: {info['total_duration_ms'] / 1000:.1f}s")
         print("-" * 70)
 
         for i, entry in enumerate(sequence, 1):
             print(
-                f"  {i:3d}. {entry['narrative_id']:20s} -> {entry['target_id']:20s} "
+                f"  {i:3d}. {entry['segment_id']:20s} -> {entry['target_id']:20s} "
                 f"[{entry['action']:6s}] {entry['duration_ms'] / 1000:7.1f}s"
             )
 
         print("-" * 70)
+        return
+
+    if args.export:
+        out = player.export(args.export)
+        info = player.get_playback_info()
+        print(f"[BVF] Exported {info['total_segments']} segments ({info['total_duration_ms'] / 1000:.1f}s) for profile {player.profile}: {out}")
         return
 
     if args.dry_run:
@@ -705,14 +814,14 @@ def main() -> None:
         info = player.get_playback_info()
 
         print(f"\nTitle: {info['title']}")
-        print(f"Profile: {args.profile}")
+        print(f"Profile: {player.profile}")
         print(f"Total segments: {info['total_segments']}")
         print(f"Total duration: {info['total_duration_ms'] / 1000:.1f}s")
         print("-" * 70)
 
         for i, entry in enumerate(sequence, 1):
             print(
-                f"  {i:3d}. {entry['narrative_id']:20s} -> {entry['target_id']:20s} "
+                f"  {i:3d}. {entry['segment_id']:20s} -> {entry['target_id']:20s} "
                 f"[{entry['action']:6s}] {entry['duration_ms'] / 1000:7.1f}s"
             )
 

@@ -357,7 +357,7 @@ Total file size is similar to the original video plus any filler content. If a m
 ## 12. Implementation Roadmap
 
 ### Phase 1: Muxer (Python)
-- `bvf_muxer.py` — takes `movie.mp4` + `movie_branch.json` + filler clips → writes `movie.bvf`
+- `bvf_muxer.py` — writes `movie.bvf` from analyzer segments and optional filler clips
 - Uses FFmpeg to split at keyframe-aligned boundaries
 - Encodes segments as H.264/AAC by default
 
