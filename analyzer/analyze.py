@@ -42,28 +42,41 @@ PROFANITY_LIST = [
 # Default profiles baked into every manifest
 DEFAULT_PROFILES = {
     "child": {
-        "label": "Child (under 13)",
-        "age": 10,
-        "gender": "any",
-        "filters": ["nudity", "violence", "language", "fear", "gore"],
+        "name": "Child (under 13)",
+        "description": "Blocks all mature content",
+        "filters": {
+            "nudity": "swap",
+            "violence": "blur",
+            "language": "mute",
+            "gore": "skip",
+            "fear": "skip",
+            "profanity": "skip",
+            "drugs": "skip",
+            "alcohol": "skip",
+        },
     },
     "teen_m": {
-        "label": "Teen male (13-17)",
-        "age": 15,
-        "gender": "male",
-        "filters": ["nudity", "gore"],
+        "name": "Teen Male (13-17)",
+        "description": "Blocks nudity and gore",
+        "filters": {
+            "nudity": "swap",
+            "gore": "skip",
+            "profanity": "mute",
+        },
     },
     "teen_f": {
-        "label": "Teen female (13-17)",
-        "age": 15,
-        "gender": "female",
-        "filters": ["nudity", "violence"],
+        "name": "Teen Female (13-17)",
+        "description": "Blocks nudity and violence",
+        "filters": {
+            "nudity": "swap",
+            "violence": "blur",
+            "profanity": "mute",
+        },
     },
     "adult": {
-        "label": "Adult (18+)",
-        "age": 18,
-        "gender": "any",
-        "filters": [],
+        "name": "Adult (18+)",
+        "description": "No filters",
+        "filters": {},
     },
 }
 
@@ -106,7 +119,7 @@ class MovieAnalyzer:
         import torch
         import whisper
         from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-        from transformers import CLIPImageProcessor
+        from transformers import CLIPImageProcessor, AutoModelForImageClassification, AutoImageProcessor
 
         logger.info(f"Loading Whisper model: {self.whisper_model_name}")
         self.whisper_model = whisper.load_model(self.whisper_model_name)
@@ -119,6 +132,18 @@ class MovieAnalyzer:
         self.feature_extractor = CLIPImageProcessor.from_pretrained(
             "CompVis/stable-diffusion-safety-checker"
         )
+
+        logger.info("Loading Falconsai NSFW detector (ViT)...")
+        self.nsfw_model = AutoModelForImageClassification.from_pretrained(
+            "Falconsai/nsfw_image_detection"
+        ).to(self._device)
+        self.nsfw_processor = AutoImageProcessor.from_pretrained(
+            "Falconsai/nsfw_image_detection"
+        )
+
+        logger.info("Loading Skin Detector (HSV-based)...")
+        from analyzer.skin_detector import SkinDetector
+        self.skin_detector = SkinDetector()
 
         logger.info("Models loaded. Ready to analyze.")
 
@@ -136,6 +161,7 @@ class MovieAnalyzer:
         # 2. Transcribe audio with word-level timestamps
         logger.info("Transcribing audio...")
         transcript_data = self._transcribe()
+        self._transcript_data = transcript_data  # Store for topic classification
 
         # 3. Extract frames and run NSFW detection
         logger.info(f"Extracting frames (every {self.frame_interval}s)...")
@@ -146,6 +172,10 @@ class MovieAnalyzer:
 
         # 5. Merge overlapping detections into segments
         segments = self._merge_segments(detections, duration)
+
+        # 5b. Classify segments for topics using LLM
+        logger.info("Classifying segments for topics with LLM...")
+        segments = self._classify_topics(segments)
 
         # 6. Generate manifest
         manifest = self._build_manifest(segments, duration)
@@ -214,7 +244,11 @@ class MovieAnalyzer:
     # ─── Step 3: Frame Extraction + NSFW ────────────────────────────────
 
     def _extract_and_classify_frames(self, duration: float) -> list[dict]:
-        """Extract one frame every `frame_interval` seconds and classify for NSFW."""
+        """Extract one frame every `frame_interval` seconds and classify for NSFW.
+
+        When a frame is flagged, binary-search backward and forward to find the
+        exact boundaries where content becomes bad/safe.
+        """
         frames_dir = self.output_dir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
 
@@ -256,16 +290,103 @@ class MovieAnalyzer:
                 # Store media type hint for downstream use
                 media_type = "cartoon" if is_cartoon else "live_action"
 
+                # Binary-search to find exact boundaries
+                bad_start = self._binary_search_boundary(
+                    start_time, duration, backward=True,
+                    is_cartoon=is_cartoon, threshold=threshold,
+                    frames_dir=frames_dir,
+                )
+                bad_end = self._binary_search_boundary(
+                    start_time, duration, backward=False,
+                    is_cartoon=is_cartoon, threshold=threshold,
+                    frames_dir=frames_dir,
+                )
+
+                logger.info(
+                    f"  Refined bad segment: {bad_start:.2f}s - {bad_end:.2f}s "
+                    f"(original sample at {start_time}s, span={bad_end - bad_start:.2f}s)"
+                )
+
                 results.append({
-                    "time": start_time,
+                    "time": bad_start,
                     "type": "nudity",
                     "score": score,
                     "media_type": media_type,
                     "is_cartoon": is_cartoon,
+                    "bad_start": bad_start,
+                    "bad_end": bad_end,
                 })
 
         logger.info(f"Extracted {num_frames} frames, flagged {len(results)} as NSFW")
         return results
+
+    def _binary_search_boundary(
+        self,
+        known_bad_time: float,
+        duration: float,
+        backward: bool,
+        is_cartoon: bool,
+        threshold: float,
+        frames_dir: Path,
+        precision: float = 0.1,
+    ) -> float:
+        """Binary-search for the exact boundary where content becomes bad/safe.
+
+        Starts from a known-bad frame and searches backward (to find start of bad
+        segment) or forward (to find end of bad segment).
+
+        Args:
+            known_bad_time: Time of the frame we know is bad.
+            duration: Total video duration.
+            backward: True to search backward (find start), False to search forward (find end).
+            is_cartoon: Whether the content is cartoon/anime.
+            threshold: NSFW confidence threshold.
+            frames_dir: Directory for cached frames.
+            precision: Minimum step size to stop searching (default 0.1s = 100ms).
+
+        Returns:
+            The boundary time in seconds.
+        """
+        if backward:
+            safe_bound = 0.0
+            bad_bound = known_bad_time
+        else:
+            bad_bound = known_bad_time
+            safe_bound = duration
+
+        while (bad_bound - safe_bound) > precision:
+            probe_time = (safe_bound + bad_bound) / 2.0
+            probe_time = max(0.0, min(probe_time, duration))
+
+            frame_path = frames_dir / f"refine_{probe_time:.3f}.jpg"
+            try:
+                self._extract_frame(probe_time, frame_path)
+            except subprocess.CalledProcessError:
+                break
+
+            if not frame_path.exists():
+                break
+
+            nsfw_score, has_nsfw = self._classify_frame(frame_path)
+            probe_score = float(nsfw_score) if has_nsfw else 0.0
+            probe_is_bad = has_nsfw and probe_score >= threshold
+
+            if backward:
+                # Searching backward: find where safe → bad transition happens
+                if probe_is_bad:
+                    bad_bound = probe_time
+                else:
+                    safe_bound = probe_time
+            else:
+                # Searching forward: find where bad → safe transition happens
+                if probe_is_bad:
+                    bad_bound = probe_time
+                else:
+                    safe_bound = probe_time
+
+        # Backward: return first bad frame (start of bad segment)
+        # Forward: return first safe frame after bad segment (end of bad segment)
+        return round(bad_bound if backward else safe_bound, 2)
 
 
     def _extract_frame(self, start_time: float, frame_path: Path) -> None:
@@ -284,42 +405,69 @@ class MovieAnalyzer:
         )
 
     def _classify_frame(self, frame_path: Path) -> tuple[float, bool]:
-        """Run a single image through the safety checker. Returns (confidence, has_nsfw_concept).
-        
-        The confidence is derived from the linear layer output (before thresholding),
-        mapped to a 0.0-1.0 range. This enables proper thresholding.
+        """Run a single image through three NSFW checkers. Returns (confidence, has_nsfw_concept).
+
+        Uses three models for maximum coverage:
+        1. Stable Diffusion Safety Checker (CLIP-based)
+        2. Falconsai ViT NSFW detector (ViT-based, 98% accuracy)
+        3. SAM 2 Skin Detector (segmentation + skin tone analysis)
+
+        Returns True if any model detects NSFW. Confidence is the max of all.
         """
         image = Image.open(frame_path).convert("RGB")
         image_array = np.array(image)
 
+        import torch
+
+        # --- Checker 1: Stable Diffusion Safety Checker ---
         safety_input = self.feature_extractor(
             images=image, return_tensors="pt"
         ).to(self._device)
 
-        import torch
-
         with torch.no_grad():
-            # forward() returns (feature_values, has_nsfw_concept: List[bool])
             feature_values, has_nsfw = self.safety_checker(
                 clip_input=safety_input.pixel_values,
                 images=[image_array],
             )
 
-        # If no NSFW concept detected, return 0.0 confidence
-        if not has_nsfw[0]:
-            return 0.0, False
+        sd_confidence = 0.0
+        if has_nsfw[0]:
+            if isinstance(feature_values, list):
+                tensor_val = feature_values[0] if feature_values else None
+            else:
+                tensor_val = feature_values
+            if tensor_val is not None and hasattr(tensor_val, "numel") and tensor_val.numel() > 0:
+                sd_confidence = float(tensor_val.abs().max().item())
+                sd_confidence = max(0.0, min(1.0, (sd_confidence + 1.0) / 2.0))
+            else:
+                sd_confidence = 0.5
 
-        # Extract confidence from the linear layer output
-        # feature_values shape: (1, num_features) for the flagged concept
-        # We use the max activation as confidence score
-        if feature_values.numel() > 0:
-            confidence = float(feature_values.abs().max().item())
-            # Clamp to [0, 1] range (safety checker outputs are typically in [-2, 2])
-            confidence = max(0.0, min(1.0, (confidence + 1.0) / 2.0))
-        else:
-            confidence = 0.5  # fallback if no feature values
+        # --- Checker 2: Falconsai ViT NSFW detector ---
+        falcon_confidence = 0.0
+        try:
+            falcon_inputs = self.nsfw_processor(images=image, return_tensors="pt").to(self._device)
+            with torch.no_grad():
+                falcon_outputs = self.nsfw_model(**falcon_inputs)
+                falcon_probs = torch.softmax(falcon_outputs.logits, dim=-1)
+            # Class 1 = "nsfw", Class 0 = "normal"
+            falcon_confidence = float(falcon_probs[0][1].item())
+        except Exception as e:
+            logger.warning(f"Falconsai checker failed: {e}")
 
-        return confidence, True
+        # --- Checker 3: Skin Detector (HSV-based) ---
+        skin_confidence = 0.0
+        skin_has_nsfw = False
+        try:
+            skin_confidence, skin_has_nsfw = self.skin_detector.analyze_frame(frame_path)
+        except Exception as e:
+            logger.warning(f"Skin detector failed: {e}")
+
+        # Combine: use max confidence, flag if any detects NSFW
+        combined_confidence = max(sd_confidence, falcon_confidence, skin_confidence)
+        # Skin detector is authoritative for older films where other classifiers fail
+        has_nsfw_combined = has_nsfw[0] or falcon_confidence > 0.3 or skin_has_nsfw
+
+        return combined_confidence, has_nsfw_combined
 
     def _detect_cartoon(self, frame_path: Path) -> bool:
         """Heuristic to detect if a frame is cartoon/anime vs live-action.
@@ -452,22 +600,76 @@ class MovieAnalyzer:
         # --- Visual: add frame NSFW detections ---
         # Get silence ratio from transcript for audio heuristic
         silence_ratio = transcript_data.get("silence_ratio", 0.0)
-        
+
         for frame in frame_results:
             detection = dict(frame)  # copy
-            
+
             # Audio heuristic: if mostly silent/no dialogue, deprioritize visual-only flags
             detection["audio_silenced"] = False
             if silence_ratio > 0.7:
                 detection["score"] = detection["score"] * 0.5
                 detection["score"] = round(detection["score"], 4)
                 detection["audio_silenced"] = True
-            
+
             detections.append(detection)
 
         # Sort by time
         detections.sort(key=lambda d: d["time"])
         return detections
+
+    # ─── Step 3b: LLM Topic Classification ──────────────────────────────
+
+    def _classify_topics(self, segments: list[dict]) -> list[dict]:
+        """Classify segments for topics using LLM.
+
+        Adds 'topics' key to each segment with LLM-classified topics.
+        """
+        try:
+            from analyzer.topic_classifier import LLMTopicClassifier
+            clf = LLMTopicClassifier()
+
+            # Build transcript segments for classification
+            transcript_segs = []
+            for seg in segments:
+                # Extract transcript for this time range
+                start = seg.get("start_time", 0)
+                end = seg.get("end_time", 0)
+                transcript = self._extract_transcript_for_segment(start, end)
+                transcript_segs.append({
+                    "transcript": transcript,
+                    "start_time": start,
+                    "end_time": end,
+                })
+
+            # Classify
+            classified = clf.classify_segments(transcript_segs)
+
+            # Add topics back to segments
+            for seg, cls in zip(segments, classified):
+                seg["topics"] = cls.get("topics", [])
+
+        except Exception as e:
+            logger.warning(f"LLM topic classification failed: {e}")
+
+        return segments
+
+    def _extract_transcript_for_segment(self, start: float, end: float) -> str:
+        """Extract transcript text for a time range."""
+        transcript = getattr(self, '_transcript_data', None)
+        if not transcript:
+            return ""
+
+        words = []
+        for seg in transcript.get("segments", []):
+            for word_data in seg.get("words", []):
+                w = word_data["word"].strip().lower()
+                ws = word_data["start"]
+                we = word_data["end"]
+                # Include word if it overlaps with the time range
+                if ws < end and we > start:
+                    words.append(w)
+
+        return " ".join(words)
 
     # ─── Step 5: Merge into Segments ────────────────────────────────────
 
@@ -479,6 +681,10 @@ class MovieAnalyzer:
         """
         Merge overlapping detections into contiguous segments.
         Each segment has a start/end time and a set of tags.
+
+        For visual detections with refined boundaries (bad_start/bad_end),
+        uses those precise times. Falls back to frame_interval extension
+        for audio detections and unrefined visual detections.
         """
         if not detections:
             # No flags at all — one safe segment covering the whole video
@@ -494,9 +700,24 @@ class MovieAnalyzer:
         segments = []
         current_tags = set()
         current_start = detections[0]["time"]
+        current_end = None
 
         for i, det in enumerate(detections):
             current_tags.update(det["tags"]) if det["type"] == "audio" else current_tags.add("nudity")
+
+            # Determine this detection's end time
+            if "bad_end" in det:
+                # Refined boundary from binary search
+                seg_end = det["bad_end"]
+            else:
+                # Fallback: extend by frame_interval
+                seg_end = min(det["time"] + self.frame_interval, duration)
+
+            # Update current segment end
+            if current_end is None:
+                current_end = seg_end
+            else:
+                current_end = max(current_end, seg_end)
 
             # Check if next detection is within frame_interval (contiguous)
             is_last = i == len(detections) - 1
@@ -504,7 +725,7 @@ class MovieAnalyzer:
 
             if is_last or (next_time - det["time"]) > self.frame_interval:
                 # End of a contiguous group
-                current_end = min(det["time"] + self.frame_interval, duration)
+                current_end = min(current_end or seg_end, duration)
 
                 tags = sorted(current_tags)
                 risk = "mature" if tags else "safe"
@@ -520,6 +741,7 @@ class MovieAnalyzer:
 
                 current_tags = set()
                 current_start = next_time
+                current_end = None
 
         # Ensure we cover the full duration — fill any gaps
         segments = self._fill_gaps(segments, duration)
@@ -575,13 +797,40 @@ class MovieAnalyzer:
     # ─── Step 6: Build Manifest ─────────────────────────────────────────
 
     def _build_manifest(self, segments: list[dict], duration: float) -> dict:
+        # Include topics in manifest for dynamic profile resolution
+        manifest_segments = []
+        for seg in segments:
+            start_time = seg.get("start_time", 0)
+            end_time = seg.get("end_time", 0)
+            manifest_seg = {
+                "id": seg["id"],
+                "start_time": start_time,
+                "end_time": end_time,
+                "start_ms": int(start_time * 1000),
+                "end_ms": int(end_time * 1000),
+                "tags": seg.get("tags", []),
+                "topics": seg.get("topics", []),
+                "risk": seg.get("risk", "safe"),
+                "profiles": seg.get("profiles", {}),
+            }
+            manifest_segments.append(manifest_seg)
+
+        # Log segment summary
+        logger.info(f"Manifest: {len(manifest_segments)} segments")
+        for seg in manifest_segments:
+            logger.info(
+                f"  {seg['id']:8s} | {seg['risk']:8s} | "
+                f"{seg['start_time']:7.1f}s - {seg['end_time']:7.1f}s | "
+                f"tags={seg.get('tags', [])} | topics={seg.get('topics', [])}"
+            )
+
         return {
             "movie_id": self.video_path.stem,
             "movie_path": str(self.video_path),
             "duration_seconds": round(duration, 2),
             "analyzed_at": datetime.utcnow().isoformat(),
             "profiles": DEFAULT_PROFILES,
-            "segments": segments,
+            "segments": manifest_segments,
         }
 
 
@@ -748,7 +997,7 @@ def main():
         print(f"   Mature: {sum(1 for s in manifest['segments'] if s['risk'] == 'mature')}")
         print(f"   Safe: {sum(1 for s in manifest['segments'] if s['risk'] == 'safe')}")
     except Exception as e:
-        logger.error(f"Analysis failed: {e}")
+        logger.error(f"Analysis failed: {e}", exc_info=True)
         sys.exit(1)
 
 

@@ -1,0 +1,14 @@
+{
+  "name": "strict_parent",
+  "description": "Skip profanity, ideology, and mature content",
+  "filters": {
+    "profanity": "skip",
+    "feminism": "skip",
+    "religion_christianity": "skip",
+    "politics": "skip",
+    "nudity": "swap",
+    "violence": "blur",
+    "drugs": "skip",
+    "alcohol": "mute"
+  }
+}

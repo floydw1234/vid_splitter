@@ -249,6 +249,16 @@ class BVFPlayer:
         if explicit_profile:
             return self._select_available_profile(explicit_profile, profiles)
 
+        # Check for custom profile JSON
+        if "user" in user_data:
+            user = user_data["user"]
+        else:
+            user = user_data
+
+        if "filters" in user:
+            # Custom profile with filters
+            return user.get("name", "custom")
+
         preferred = self._profile_from_user_data(user_data)
         return self._select_available_profile(preferred, profiles)
 
@@ -322,9 +332,8 @@ class BVFPlayer:
 
             profile_entry = seg.get("profiles", {}).get(self.profile)
             if profile_entry is None:
-                # No profile entry — default to play
-                action = "play"
-                target_id = seg["id"]
+                # Try dynamic resolution with profile filters
+                action, target_id = self._resolve_dynamic_action(seg)
             else:
                 action = profile_entry.get("action", "play")
                 target_id = profile_entry.get("segment_id", seg["id"])
@@ -354,6 +363,42 @@ class BVFPlayer:
 
         self._playback_sequence = sequence
         return sequence
+
+    def _resolve_dynamic_action(self, seg: dict) -> tuple[str, str]:
+        """Resolve action dynamically using profile filters.
+
+        Args:
+            seg: Segment data with tags and topics.
+
+        Returns:
+            Tuple of (action, target_segment_id).
+        """
+        # Check if user_data has filters
+        user = self.user_data.get("user", self.user_data)
+        filters = user.get("filters", {})
+
+        if not filters:
+            return "play", seg["id"]
+
+        # Get segment labels
+        tags = seg.get("tags", [])
+        topics = seg.get("topics", [])
+        all_labels = set(tags) | set(topics)
+
+        # Find most restrictive action
+        actions = []
+        for label in all_labels:
+            if label in filters:
+                actions.append(filters[label])
+
+        if not actions:
+            return "play", seg["id"]
+
+        # Priority: skip > swap > blur > mute > play
+        priority = {"skip": 5, "swap": 4, "blur": 3, "mute": 2, "play": 1}
+        most_restrictive = max(actions, key=lambda a: priority.get(a, 0))
+
+        return most_restrictive, seg["id"]
 
     # ------------------------------------------------------------------
     # Segment extraction

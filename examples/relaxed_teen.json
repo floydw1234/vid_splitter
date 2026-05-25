@@ -1,0 +1,11 @@
+{
+  "name": "relaxed_teen",
+  "description": "Allow mild language, block explicit content",
+  "filters": {
+    "profanity": "mute",
+    "nudity": "swap",
+    "violence": "play",
+    "drugs": "skip",
+    "gore": "blur"
+  }
+}

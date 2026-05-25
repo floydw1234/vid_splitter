@@ -1,0 +1,7 @@
+{
+  "name": "skip_nudity",
+  "description": "Skip all nudity, play everything else",
+  "filters": {
+    "nudity": "skip"
+  }
+}
