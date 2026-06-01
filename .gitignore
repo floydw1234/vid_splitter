@@ -34,3 +34,7 @@ filler/
 
 # Logs
 *.log
+
+# Build artifacts
+csharp_plugin/bin/
+csharp_plugin/obj/
