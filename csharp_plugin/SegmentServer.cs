@@ -2,15 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.SmartBranching.Models;
-using MediaBrowser.Controller;
-using MediaBrowser.Controller.MediaEncoding;
-using MediaBrowser.Controller.MediaSources;
-using MediaBrowser.Controller.Playback;
-using MediaBrowser.Controller.Streaming;
-using MediaBrowser.Controller.Videos;
+using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging;
@@ -22,45 +20,41 @@ namespace Jellyfin.Plugin.SmartBranching;
 /// 
 /// Architecture:
 /// 1. User clicks "Play" on a movie
-/// 2. Jellyfin calls our video processor
-/// 3. We read the BVF file, resolve segments for the user's profile
+/// 2. Jellyfin asks this provider for media sources
+/// 3. We expose one Smart Branch source per BVF profile
 /// 4. We serve the resolved segments through Jellyfin's streaming pipeline
-/// 5. Segments marked for swap are replaced with fillers or skipped
+/// 5. Segment actions are read from the BVF manifest
 /// </summary>
-public class SegmentServer : IMediaSourceProvider, IVideoProcessor
+public class SegmentServer : IMediaSourceProvider
 {
+    private const string TokenPrefix = "smart-branch";
+    private const int AssetBlockHeaderSize = 32;
+
     private readonly ILogger<SegmentServer> _logger;
-    private readonly IApplicationPaths _applicationPaths;
     private readonly ProfileResolver _profileResolver;
-    private readonly Dictionary<string, BVFManifest> _bvfManifestCache = new();
-    private readonly Dictionary<string, BVFBinaryReader> _bvfReaders = new();
+    private readonly Dictionary<string, BranchManifest> _bvfManifestCache = new();
 
     public SegmentServer(
         ILogger<SegmentServer> logger,
         IApplicationPaths applicationPaths)
     {
+        ArgumentNullException.ThrowIfNull(applicationPaths);
         _logger = logger;
-        _applicationPaths = applicationPaths;
         _profileResolver = new ProfileResolver();
     }
 
     /// <summary>
     /// Gets or creates a BVF manifest for a movie, with caching.
     /// </summary>
-    private BVFManifest GetBvfManifest(string bvfPath)
+    private BranchManifest GetBvfManifest(string bvfPath)
     {
         if (_bvfManifestCache.TryGetValue(bvfPath, out var cached))
             return cached;
 
         try
         {
-            var reader = BVFBinaryReader.Open(bvfPath);
-            var manifestJson = reader.GetManifestJson();
-            var manifest = BVFManifestParser.Parse(manifestJson);
-            
+            var manifest = BVFReader.LoadBvfManifest(bvfPath);
             _bvfManifestCache[bvfPath] = manifest;
-            _bvfReaders[bvfPath] = reader;
-
             return manifest;
         }
         catch (Exception ex)
@@ -71,28 +65,10 @@ public class SegmentServer : IMediaSourceProvider, IVideoProcessor
     }
 
     /// <summary>
-    /// Gets the BVF reader for a path (lazy-loaded, cached).
-    /// </summary>
-    private BVFBinaryReader GetBvfReader(string bvfPath)
-    {
-        if (!_bvfReaders.TryGetValue(bvfPath, out var reader))
-        {
-            reader = BVFBinaryReader.Open(bvfPath);
-            _bvfReaders[bvfPath] = reader;
-        }
-        return reader;
-    }
-
-    /// <summary>
     /// Clears all caches (call when library changes).
     /// </summary>
     public void ClearCache()
     {
-        foreach (var reader in _bvfReaders.Values)
-        {
-            try { reader.Close(); } catch { }
-        }
-        _bvfReaders.Clear();
         _bvfManifestCache.Clear();
         _logger.LogInformation("BVF manifest cache cleared");
     }
@@ -116,31 +92,11 @@ public class SegmentServer : IMediaSourceProvider, IVideoProcessor
     /// Resolves all segments for a movie and user profile.
     /// Returns a list of resolved segments with actual file paths.
     /// </summary>
-    public List<ResolvedBvfSegment> ResolveAllSegments(string bvfPath, UserDto user)
+    public List<ResolvedSegment> ResolveAllSegments(string bvfPath, UserDto user)
     {
         var manifest = GetBvfManifest(bvfPath);
-        var profileKey = _profileResolver.ResolveProfileForBvf(user, manifest);
-        
-        var reader = GetBvfReader(bvfPath);
-        var segmentBlocks = new Dictionary<string, BVFBinaryReader.SegmentBlock>();
-        
-        foreach (var block in reader.GetSegmentBlocks())
-        {
-            segmentBlocks[block.Header.SegmentId] = block;
-        }
-
-        var resolved = BVFManifestParser.ResolveSegmentsForProfile(
-            manifest, profileKey, segmentBlocks);
-
-        _logger.LogInformation(
-            "Resolved {Total} segments for {Movie} (profile: {Profile}, swapped: {Swapped}, skipped: {Skipped})",
-            resolved.Count,
-            manifest.MovieId,
-            profileKey,
-            resolved.Count(s => s.IsSwap),
-            resolved.Count(s => s.IsSkip));
-
-        return resolved;
+        var profileKey = _profileResolver.ResolveProfile(user, manifest);
+        return ResolveAllSegmentsForProfile(bvfPath, profileKey);
     }
 
     /// <summary>
@@ -154,217 +110,286 @@ public class SegmentServer : IMediaSourceProvider, IVideoProcessor
     /// <summary>
     /// Gets the manifest for a movie without caching (for admin/debug).
     /// </summary>
-    public BVFManifest GetManifestRaw(string bvfPath)
+    public BranchManifest GetManifestRaw(string bvfPath)
     {
         return GetBvfManifest(bvfPath);
     }
 
-    // ─── IMediaSourceProvider ────────────────────────────────────────
-
     /// <summary>
     /// Provides media sources for BVF content.
-    /// When a movie has a .bvf file, we add a "Smart Branch" source
-    /// that serves the profile-filtered stream.
+    /// When a movie has a .bvf file, we add one "Smart Branch" source per
+    /// manifest profile. The chosen profile is encoded in the OpenToken.
     /// </summary>
-    public async Task<IEnumerable<MediaSourceInfo>> GetMediaSources(MediaSourceQuery query)
+    public Task<IEnumerable<MediaSourceInfo>> GetMediaSources(
+        BaseItem item,
+        CancellationToken cancellationToken)
     {
-        if (query.ItemId == Guid.Empty)
-            return Enumerable.Empty<MediaSourceInfo>();
+        if (Plugin.Instance?.Configuration.Enabled == false)
+            return Task.FromResult(Enumerable.Empty<MediaSourceInfo>());
+
+        if (item == null || string.IsNullOrEmpty(item.Path))
+            return Task.FromResult(Enumerable.Empty<MediaSourceInfo>());
 
         try
         {
-            var item = await GetItem(query.ItemId).ConfigureAwait(false);
-            if (item == null)
-                return Enumerable.Empty<MediaSourceInfo>();
-
             var moviePath = item.Path;
             var bvfPath = FindBvfFile(moviePath);
 
             if (bvfPath == null)
-                return Enumerable.Empty<MediaSourceInfo>();
-
-            // Check if this is a BVF-aware item
-            if (!HasBvfFile(moviePath))
-                return Enumerable.Empty<MediaSourceInfo>();
+                return Task.FromResult(Enumerable.Empty<MediaSourceInfo>());
 
             var manifest = GetBvfManifest(bvfPath);
+            var defaultProfile = GetDefaultProfile(manifest);
+            var profiles = manifest.Profiles.Keys
+                .OrderByDescending(profile => string.Equals(profile, defaultProfile, StringComparison.Ordinal))
+                .ThenBy(profile => profile, StringComparer.Ordinal)
+                .DefaultIfEmpty(defaultProfile)
+                .Select(profile => CreateMediaSourceInfo(bvfPath, profile));
 
-            // Create a media source for the BVF content
-            var mediaSource = new MediaSourceInfo
-            {
-                Id = $"{bvfPath}::smart-branch",
-                Name = "Smart Branch",
-                Path = bvfPath,
-                Container = "bvf",
-                MediaStreams = new List<MediaStream>
-                {
-                    new MediaStream
-                    {
-                        CodecType = MediaStreamType.Video,
-                        CodecName = "BVF",
-                        DisplayTitle = "Smart Branch (BVF)"
-                    }
-                },
-                SupportsProbing = false,
-                IsRemote = false,
-                SupportsTiming = true
-            };
-
-            return new[] { mediaSource };
+            return Task.FromResult<IEnumerable<MediaSourceInfo>>(profiles.ToList());
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to get media sources for item {ItemId}", query.ItemId);
-            return Enumerable.Empty<MediaSourceInfo>();
+            _logger.LogError(ex, "Failed to get media sources for item {ItemId}", item.Id);
+            return Task.FromResult(Enumerable.Empty<MediaSourceInfo>());
         }
     }
 
     /// <summary>
-    /// Gets the media stream for a BVF item.
+    /// Opens the selected BVF media source. Jellyfin's IMediaSourceProvider API
+    /// does not pass the requesting user into this call, so the profile is encoded
+    /// in the media source id generated by <see cref="GetMediaSources"/>.
     /// </summary>
-    public async Task<StreamResult> OpenMediaStream(
-        MediaStreamRequest request,
+    public Task<ILiveStream> OpenMediaSource(
+        string openToken,
+        List<ILiveStream> currentLiveStreams,
         CancellationToken cancellationToken)
     {
+        if (Plugin.Instance?.Configuration.Enabled == false)
+            throw new InvalidOperationException("Smart Branching is disabled.");
+
         try
         {
-            // Parse the item ID and BVF path from the media source ID
-            var mediaSourceId = request.MediaSourceId;
-            var parts = mediaSourceId.Split("::");
-            if (parts.Length != 2)
-                throw new ArgumentException($"Invalid media source ID: {mediaSourceId}");
+            var (bvfFile, profileKey) = DecodeMediaSourceToken(openToken);
+            if (!File.Exists(bvfFile))
+                throw new FileNotFoundException($"BVF file not found: {bvfFile}");
 
-            var bvfPath = parts[0];
-            var bvfFile = FindBvfFile(bvfPath);
-            if (bvfFile == null)
-                throw new FileNotFoundException($"BVF file not found: {bvfPath}");
-
-            var manifest = GetBvfManifest(bvfFile);
-            var reader = GetBvfReader(bvfFile);
-
-            // Get user profile
-            var user = await GetUser(request.UserId).ConfigureAwait(false);
-            if (user == null)
-                throw new UnauthorizedAccessException("User not found");
-
-            // Resolve segments for profile
-            var resolvedSegments = ResolveAllSegments(bvfFile, user);
-
-            // Handle seek with profile-adjusted timestamp
-            var seekPosition = request.StartPositionTicks / TimeSpan.TicksPerMillisecond;
-            var patMapping = BVFManifestParser.ComputePatMapping(manifest, resolvedSegments);
-            
-            var seekResult = BVFManifestParser.SeekToPat(resolvedSegments, patMapping, (ulong)seekPosition);
-            
-            if (seekResult == null)
-            {
-                // Seek past end — return first playable segment
-                seekResult = resolvedSegments.FirstOrDefault(s => s.Playable && !s.IsSkip);
-            }
-
-            if (seekResult == null)
+            var resolvedSegments = ResolveAllSegmentsForProfile(bvfFile, profileKey);
+            if (resolvedSegments.Count == 0)
                 throw new InvalidOperationException("No playable segments found");
 
-            var targetSegment = (ResolvedBvfSegment)seekResult.Segment!;
-            var targetSegmentId = targetSegment.TargetSegmentId;
-            var block = reader.GetSegmentBlockByName(targetSegmentId);
-
-            if (block == null)
-                throw new FileNotFoundException($"Segment block not found: {targetSegmentId}");
-
-            // Handle mute action — serve video-only stream
-            if (targetSegment.IsMute)
-            {
-                // Filter out audio packets
-                var videoOnlyPackets = block.Packets
-                    .Where(p => p.IsVideo)
-                    .ToList();
-                
-                return new StreamResult(
-                    new MemoryStream(CombinePackets(videoOnlyPackets)),
-                    "video/mp2t",
-                    videoOnlyPackets.Count,
-                    0,
-                    block.Header.CodecVideo);
-            }
-
-            // Handle swap action — serve the filler segment's data
-            if (targetSegment.IsSwap)
-            {
-                var fillerBlock = reader.GetSegmentBlockByName(targetSegmentId);
-                if (fillerBlock != null)
-                {
-                    return new StreamResult(
-                        new MemoryStream(CombinePackets(fillerBlock.Packets)),
-                        "video/mp2t",
-                        fillerBlock.Packets.Count,
-                        0,
-                        fillerBlock.Header.CodecVideo);
-                }
-            }
-
-            // Normal play — serve the segment's packets
-            return new StreamResult(
-                new MemoryStream(CombinePackets(block.Packets)),
-                "video/mp2t",
-                block.Packets.Count,
-                0,
-                block.Header.CodecVideo);
+            var liveStream = new BvfLiveStream(
+                CreateMediaSourceInfo(bvfFile, profileKey),
+                () => BuildResolvedStream(bvfFile, resolvedSegments));
+            return Task.FromResult<ILiveStream>(liveStream);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to open media stream");
+            _logger.LogError(ex, "Failed to open BVF media source");
             throw;
         }
     }
 
-    /// <summary>
-    /// Combines packets into a single byte stream.
-    /// </summary>
-    private byte[] CombinePackets(List<BVFBinaryReader.PacketData> packets)
+    private static Stream BuildResolvedStream(string bvfPath, IEnumerable<ResolvedSegment> segments)
     {
-        using var ms = new MemoryStream();
-        foreach (var packet in packets)
+        var output = new MemoryStream();
+        foreach (var segment in segments)
         {
-            ms.Write(packet.Data, 0, packet.Data.Length);
+            var bvfSegment = new BVFSegment(
+                0,
+                0,
+                string.Empty,
+                segment.AudioHash,
+                segment.SegmentId,
+                segment.DurationMs,
+                segment.DataOffset,
+                segment.DataLength);
+            var block = BVFReader.ReadSegmentData(bvfPath, bvfSegment);
+            var payload = ExtractMediaPayload(block);
+            output.Write(payload, 0, payload.Length);
         }
-        return ms.ToArray();
+
+        output.Seek(0, SeekOrigin.Begin);
+        return output;
     }
 
-    // ─── IVideoProcessor ─────────────────────────────────────────────
-
-    /// <summary>
-    /// Processes video items for BVF content.
-    /// This is called by Jellyfin when a video item is accessed.
-    /// </summary>
-    public async Task ProcessVideo(
-        BaseItem item,
-        MediaRequest request,
-        CancellationToken cancellationToken)
+    private static byte[] ExtractMediaPayload(byte[] block)
     {
-        var bvfPath = FindBvfFile(item.Path);
-        if (bvfPath == null)
-            return; // Not a BVF item, skip processing
+        if (block.Length <= AssetBlockHeaderSize)
+            return Array.Empty<byte>();
 
-        _logger.LogDebug("Processing BVF content for item {ItemId}: {Path}", item.Id, item.Path);
+        var payload = new byte[block.Length - AssetBlockHeaderSize];
+        Buffer.BlockCopy(block, AssetBlockHeaderSize, payload, 0, payload.Length);
+        return payload;
+    }
 
-        try
+    private List<ResolvedSegment> ResolveAllSegmentsForProfile(string bvfPath, string profileKey)
+    {
+        var manifest = GetBvfManifest(bvfPath);
+        var index = BVFReader.GetSegments(bvfPath)
+            .ToDictionary(s => s.segmentId, StringComparer.Ordinal);
+        var resolved = new List<ResolvedSegment>();
+
+        foreach (var segment in manifest.Segments)
         {
-            var manifest = GetBvfManifest(bvfPath);
-            var user = await GetUser(request.UserId).ConfigureAwait(false);
-            
-            if (user != null)
+            if (segment.IsFiller)
+                continue;
+
+            var action = "play";
+            var targetSegmentId = segment.Id;
+            if (segment.Profiles.TryGetValue(profileKey, out var profileAction))
             {
-                var profileKey = _profileResolver.ResolveProfileForBvf(user, manifest);
-                _logger.LogInformation(
-                    "BVF processing: {MovieId} -> profile {Profile}",
-                    manifest.MovieId,
-                    profileKey);
+                action = string.IsNullOrEmpty(profileAction.Action) ? "play" : profileAction.Action;
+                targetSegmentId = string.IsNullOrEmpty(profileAction.SegmentId)
+                    ? segment.Id
+                    : profileAction.SegmentId;
             }
+
+            if (string.Equals(action, "skip", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!index.TryGetValue(targetSegmentId, out var target))
+            {
+                _logger.LogWarning(
+                    "BVF segment {SegmentId} resolves to missing target {TargetSegmentId}",
+                    segment.Id,
+                    targetSegmentId);
+                continue;
+            }
+
+            resolved.Add(new ResolvedSegment
+            {
+                Source = segment,
+                ResolvedPath = $"bvf://{bvfPath}?seg_id={targetSegmentId}&offset={target.dataOffset}&length={target.dataLength}",
+                IsSwapped = string.Equals(action, "swap", StringComparison.OrdinalIgnoreCase),
+                Action = action,
+                SwapType = string.Equals(action, "swap", StringComparison.OrdinalIgnoreCase) ? "filler" : "original",
+                SegmentId = targetSegmentId,
+                DataOffset = target.dataOffset,
+                DataLength = target.dataLength,
+                DurationMs = target.durationMs,
+                AudioHash = target.audioHash,
+            });
         }
-        catch (Exception ex)
+
+        _logger.LogInformation(
+            "Resolved {Total} segments for {Movie} (profile: {Profile}, swapped: {Swapped}, skipped: {Skipped}, muted: {Muted})",
+            resolved.Count,
+            manifest.MovieId,
+            profileKey,
+            resolved.Count(s => s.IsSwapped),
+            manifest.Segments.Count(s => !s.IsFiller) - resolved.Count,
+            resolved.Count(s => string.Equals(s.Action, "mute", StringComparison.OrdinalIgnoreCase)));
+
+        return resolved;
+    }
+
+    private static string GetDefaultProfile(BranchManifest manifest)
+    {
+        var configured = Plugin.Instance?.Configuration?.DefaultProfile;
+        if (!string.IsNullOrEmpty(configured) && manifest.Profiles.ContainsKey(configured))
+            return configured;
+
+        foreach (var candidate in new[] { "adult", "teen_m", "teen_f", "teen", "child" })
         {
-            _logger.LogError(ex, "Failed to process BVF content for item {ItemId}", item.Id);
+            if (manifest.Profiles.ContainsKey(candidate))
+                return candidate;
+        }
+
+        return manifest.Profiles.Keys.FirstOrDefault() ?? "adult";
+    }
+
+    private static MediaSourceInfo CreateMediaSourceInfo(string bvfPath, string profileKey)
+    {
+        var token = EncodeMediaSourceToken(bvfPath, profileKey);
+        return new MediaSourceInfo
+        {
+            Id = token,
+            Name = $"Smart Branch ({profileKey})",
+            Path = bvfPath,
+            Container = "mp4",
+            MediaStreams = new List<MediaStream>
+            {
+                new MediaStream
+                {
+                    Type = MediaStreamType.Video,
+                    Codec = "h264",
+                },
+            },
+            SupportsProbing = false,
+            IsRemote = false,
+            RequiresOpening = true,
+            OpenToken = token,
+            RequiresClosing = true,
+            SupportsDirectPlay = false,
+            SupportsDirectStream = true,
+            SupportsTranscoding = true,
+        };
+    }
+
+    private static string EncodeMediaSourceToken(string bvfPath, string profileKey)
+    {
+        return $"{TokenPrefix}:{Base64UrlEncode(bvfPath)}:{Base64UrlEncode(profileKey)}";
+    }
+
+    private static (string BvfPath, string ProfileKey) DecodeMediaSourceToken(string token)
+    {
+        var parts = token.Split(':');
+        if (parts.Length != 3 || !string.Equals(parts[0], TokenPrefix, StringComparison.Ordinal))
+            throw new ArgumentException($"Invalid BVF media source token: {token}", nameof(token));
+
+        return (Base64UrlDecode(parts[1]), Base64UrlDecode(parts[2]));
+    }
+
+    private static string Base64UrlEncode(string value)
+    {
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(value))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+    }
+
+    private static string Base64UrlDecode(string value)
+    {
+        var padded = value.Replace('-', '+').Replace('_', '/');
+        padded = padded.PadRight(padded.Length + ((4 - padded.Length % 4) % 4), '=');
+        return Encoding.UTF8.GetString(Convert.FromBase64String(padded));
+    }
+
+    private sealed class BvfLiveStream : ILiveStream
+    {
+        private readonly Func<Stream> _streamFactory;
+
+        public BvfLiveStream(MediaSourceInfo mediaSource, Func<Stream> streamFactory)
+        {
+            MediaSource = mediaSource;
+            _streamFactory = streamFactory;
+        }
+
+        public int ConsumerCount { get; set; }
+        public string OriginalStreamId { get; set; } = string.Empty;
+        public string TunerHostId => "SmartBranching";
+        public bool EnableStreamSharing => false;
+        public MediaSourceInfo MediaSource { get; set; }
+        public string UniqueId { get; } = Guid.NewGuid().ToString("N");
+
+        public Task Open(CancellationToken openCancellationToken)
+        {
+            return Task.CompletedTask;
+        }
+
+        public Task Close()
+        {
+            return Task.CompletedTask;
+        }
+
+        public Stream GetStream()
+        {
+            return _streamFactory();
+        }
+
+        public void Dispose()
+        {
         }
     }
 }

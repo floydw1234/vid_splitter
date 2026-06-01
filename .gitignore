@@ -13,6 +13,7 @@ __pycache__/
 # Generated files
 frames/
 *.ts
+*.bvf
 *_branch.json
 
 # IDE

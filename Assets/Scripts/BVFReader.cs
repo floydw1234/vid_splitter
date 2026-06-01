@@ -28,15 +28,14 @@ public struct BVFInfo
 }
 
 /// <summary>
-/// Parses BVF (Binary Video Format) files: header, segment index, zstd manifest, and segment data blocks.
+/// Parses BVF files: header, segment index, zstd manifest, and media asset blocks.
 /// </summary>
 public static class BVFReader
 {
     private const ulong BVF_MAGIC = 0x0000000001465642; // "BVF\x01" + 4 reserved bytes in little-endian
     private const int INDEX_ENTRY_SIZE = 40;
-    private const int SEG_BLOCK_MAGIC = 0x00474553; // "SEG\0" in little-endian
-    private const int SEG_BLOCK_HEADER_SIZE = 32;
-    private const byte AUDIO_PACKET_TYPE = 0x02;
+    private const int ASSET_BLOCK_MAGIC = 0x00415642; // "BVA\0" in little-endian
+    private const int ASSET_BLOCK_HEADER_SIZE = 32;
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -236,8 +235,8 @@ public static class BVFReader
         byte[] decompressed;
         try
         {
-            using var decompressor = new ZstdNet.Decompressor();
-            decompressed = decompressor.Unwrap(compressedData);
+            using var decompressor = new ZstdSharp.Decompressor();
+            decompressed = decompressor.Unwrap(compressedData).ToArray();
         }
         catch (Exception ex)
         {
@@ -300,9 +299,9 @@ public static class BVFReader
         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
 
         var blockMagic = reader.ReadUInt32();
-        if (blockMagic != SEG_BLOCK_MAGIC)
+        if (blockMagic != ASSET_BLOCK_MAGIC)
             throw new InvalidDataException(
-                $"Invalid segment block magic for '{entry.SegmentId}': expected 0x{SEG_BLOCK_MAGIC:X8}, got 0x{blockMagic:X8}");
+                $"Invalid asset block magic for '{entry.SegmentId}': expected 0x{ASSET_BLOCK_MAGIC:X8}, got 0x{blockMagic:X8}");
 
         var blockSegmentId = Encoding.UTF8.GetString(reader.ReadBytes(16)).TrimEnd('\0');
         if (blockSegmentId != entry.SegmentId)
@@ -312,31 +311,12 @@ public static class BVFReader
         reader.ReadUInt32();
         reader.ReadUInt32();
 
-        using var audioData = new MemoryStream();
-        var position = (ulong)SEG_BLOCK_HEADER_SIZE;
-        while (position + 16 <= entry.DataLength)
-        {
-            var packetTypeAndReserved = reader.ReadUInt32();
-            var packetType = (byte)(packetTypeAndReserved & 0xFF);
-            var packetSize = reader.ReadUInt32();
-            reader.ReadUInt64();
-            position += 16;
-
-            if (packetSize > entry.DataLength - position)
-                throw new InvalidDataException($"Packet in segment '{entry.SegmentId}' exceeds segment block length.");
-
-            var packetData = reader.ReadBytes(checked((int)packetSize));
-            if (packetType == AUDIO_PACKET_TYPE)
-                audioData.Write(packetData, 0, packetData.Length);
-
-            position += packetSize;
-        }
-
-        if (audioData.Length == 0)
+        var payloadLength = checked((int)entry.DataLength) - ASSET_BLOCK_HEADER_SIZE;
+        if (payloadLength <= 0)
             return string.Empty;
 
-        audioData.Seek(0, SeekOrigin.Begin);
-        return Convert.ToHexString(SHA256.HashData(audioData)).ToLowerInvariant();
+        var payload = reader.ReadBytes(payloadLength);
+        return Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
     }
 
     private static BranchManifest ToBranchManifest(ManifestData manifest, string bvfPath, string? moviePath)
@@ -438,7 +418,7 @@ public static class BVFReader
     private sealed class ManifestProfile
     {
         [JsonPropertyName("filters")]
-        public List<string> Filters { get; set; } = new();
+        public Dictionary<string, string> Filters { get; set; } = new();
     }
 
     private sealed class ManifestSegment

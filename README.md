@@ -16,7 +16,7 @@ ffmpeg -y \
   /tmp/bvf-demo/demo.mp4
 ```
 
-Analyze it into the custom BVF file. `--demo-branch` is a lightweight deterministic path for local verification: it marks the middle third as mature and embeds playable media segment bytes without loading Whisper/Safety Checker.
+Analyze it into the custom BVF file. `--demo-branch` is a lightweight deterministic path for local verification: it marks the middle third as mature and embeds playable fMP4/CMAF media assets without loading Whisper/Safety Checker.
 
 ```bash
 python3 analyzer/analyze.py /tmp/bvf-demo/demo.mp4 --demo-branch --output-dir /tmp/bvf-demo

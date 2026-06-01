@@ -1,16 +1,16 @@
-"""
-Branched Video Format (BVF) Muxer
+"""Branched Video Format (BVF) muxer.
 
-Writes .bvf files from segment data produced by the analyzer.
-Follows the BVF specification exactly.
+BVF is a branching package format: it stores profile rules, timeline metadata,
+and byte-indexed standard media assets. Production BVF payloads are fMP4/CMAF
+fragments, not raw codec packets.
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import struct
-import sys
-import zlib
 from datetime import datetime, timezone
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -27,24 +27,25 @@ CODEC_OPUS = 0x00000101
 CODEC_AC3 = 0x00000102
 CODEC_EAC3 = 0x00000103
 
-# --- Packet types (u8) ---
-PACKET_VIDEO = 0x01
-PACKET_AUDIO = 0x02
-PACKET_SUBTITLE = 0x03
+# --- Media asset containers (u32) ---
+CONTAINER_FMP4 = 0x00000001
+CONTAINER_MPEGTS = 0x00000002
+CONTAINER_NAMES = {
+    CONTAINER_FMP4: "fmp4",
+    CONTAINER_MPEGTS: "mpegts",
+}
+CONTAINER_IDS = {v: k for k, v in CONTAINER_NAMES.items()}
 
-# --- Block magic ---
-BLOCK_MAGIC = b"SEG\x00"
-
-# --- File header magic ---
+ASSET_BLOCK_MAGIC = b"BVA\x00"
+BLOCK_MAGIC = ASSET_BLOCK_MAGIC
 FILE_MAGIC = b"BVF\x01\x00\x00\x00\x00"
 
-# --- Sizes ---
 FILE_HEADER_SIZE = 64
 INDEX_ENTRY_SIZE = 40
-BLOCK_HEADER_SIZE = 32
-PACKET_HEADER_SIZE = 16
+ASSET_BLOCK_HEADER_SIZE = 32
+BLOCK_HEADER_SIZE = ASSET_BLOCK_HEADER_SIZE
+PACKET_HEADER_SIZE = 0
 
-# --- Manifest flags ---
 FLAG_MANIFEST_COMPRESSED = 0x00000001
 FLAG_HAS_CHAPTERS = 0x00000002
 FLAG_HAS_SUBTITLES = 0x00000004
@@ -54,7 +55,6 @@ DEFAULT_FLAGS = FLAG_MANIFEST_COMPRESSED | FLAG_SEEKABLE
 
 
 def _risk_to_int(risk: str) -> int:
-    """Map risk string to integer for manifest."""
     mapping = {"safe": 0, "mature": 1, "restricted": 2}
     val = mapping.get(risk)
     if val is None:
@@ -63,7 +63,6 @@ def _risk_to_int(risk: str) -> int:
 
 
 def _action_to_int(action: str) -> int:
-    """Map action string to integer for manifest."""
     mapping = {"play": 0, "swap": 1, "skip": 2, "mute": 3, "blur": 4}
     val = mapping.get(action)
     if val is None:
@@ -71,13 +70,47 @@ def _action_to_int(action: str) -> int:
     return val
 
 
+def _normalize_profile_filters(filters: Any) -> dict[str, str]:
+    if filters is None:
+        return {}
+    if isinstance(filters, dict):
+        normalized = {}
+        for tag, action in filters.items():
+            action = str(action)
+            _action_to_int(action)
+            normalized[str(tag)] = action
+        return normalized
+    raise ValueError(f"Unsupported profile filters shape: {type(filters).__name__}")
+
+
+def _most_restrictive_action(actions: list[str], default_action: str) -> str:
+    if not actions:
+        return "play"
+    priority = {"skip": 5, "swap": 4, "blur": 3, "mute": 2, "play": 1}
+    return max(actions, key=lambda a: priority.get(a, priority[default_action]))
+
+
+def _container_id(container: str | int | None) -> int:
+    if container is None:
+        return CONTAINER_FMP4
+    if isinstance(container, int):
+        if container not in CONTAINER_NAMES:
+            raise ValueError(f"Unknown BVF media container id: {container!r}")
+        return container
+    key = str(container).lower()
+    if key not in CONTAINER_IDS:
+        raise ValueError(f"Unknown BVF media container: {container!r}")
+    return CONTAINER_IDS[key]
+
+
+def _container_name(container: str | int | None) -> str:
+    return CONTAINER_NAMES[_container_id(container)]
+
+
 def _pad_segment_id(segment_id: str, length: int = 16) -> bytes:
-    """Pad a segment_id string to the given length with null bytes."""
     raw = segment_id.encode("utf-8")
     if len(raw) > length:
-        raise ValueError(
-            f"Segment ID {segment_id!r} exceeds max length {length}"
-        )
+        raise ValueError(f"Segment ID {segment_id!r} exceeds max length {length}")
     return raw.ljust(length, b"\x00")
 
 
@@ -90,12 +123,11 @@ def _build_file_header(
     manifest_length: int,
     flags: int = DEFAULT_FLAGS,
 ) -> bytes:
-    """Build the 64-byte file header."""
     header = struct.pack(
         "<8s HH I Q Q Q Q I Q I",
         FILE_MAGIC,
-        1,  # version_major
-        0,  # version_minor
+        1,
+        0,
         flags,
         index_offset,
         index_length,
@@ -103,18 +135,15 @@ def _build_file_header(
         manifest_length,
         segment_count,
         total_duration_ms,
-        0,  # reserved
+        0,
     )
-    assert len(header) == FILE_HEADER_SIZE, (
-        f"File header size mismatch: {len(header)} != {FILE_HEADER_SIZE}"
-    )
+    assert len(header) == FILE_HEADER_SIZE
     return header
 
 
 def _build_index_entry(
     segment_id: str, data_offset: int, data_length: int, duration_ms: int
 ) -> bytes:
-    """Build a 40-byte segment index entry."""
     entry = struct.pack(
         "<16s Q Q Q",
         _pad_segment_id(segment_id),
@@ -122,112 +151,77 @@ def _build_index_entry(
         data_length,
         duration_ms,
     )
-    assert len(entry) == INDEX_ENTRY_SIZE, (
-        f"Index entry size mismatch: {len(entry)} != {INDEX_ENTRY_SIZE}"
-    )
+    assert len(entry) == INDEX_ENTRY_SIZE
     return entry
 
 
 def _build_block_header(
     segment_id: str,
-    codec_video: int = CODEC_H264,
-    codec_audio: int = CODEC_AAC_LC,
+    container: str | int = CONTAINER_FMP4,
+    flags: int = 0,
 ) -> bytes:
-    """Build a 32-byte segment data block header."""
     header = struct.pack(
         "<4s 16s III",
-        BLOCK_MAGIC,
+        ASSET_BLOCK_MAGIC,
         _pad_segment_id(segment_id),
-        codec_video,
-        codec_audio,
-        0,  # reserved
+        _container_id(container),
+        flags,
+        0,
     )
-    assert len(header) == BLOCK_HEADER_SIZE, (
-        f"Block header size mismatch: {len(header)} != {BLOCK_HEADER_SIZE}"
-    )
+    assert len(header) == ASSET_BLOCK_HEADER_SIZE
     return header
 
 
-def _build_packet(packet_type: int, packet_data: bytes, pts_ms: int) -> bytes:
-    """Build a variable-length block packet.
+def _parse_block_header(data: bytes) -> dict[str, Any]:
+    if len(data) < ASSET_BLOCK_HEADER_SIZE:
+        raise ValueError("Asset block header is truncated")
+    magic, segment_id_bytes, container, flags, reserved = struct.unpack(
+        "<4s 16s III", data[:ASSET_BLOCK_HEADER_SIZE]
+    )
+    if magic != ASSET_BLOCK_MAGIC:
+        raise ValueError(f"Invalid asset block magic: {magic!r}")
+    return {
+        "magic": magic,
+        "segment_id": segment_id_bytes.rstrip(b"\x00").decode("utf-8"),
+        "container": _container_name(container),
+        "flags": flags,
+        "reserved": reserved,
+    }
 
-    Packet layout:
-      packet_type (u8) + reserved (u24) + packet_size (u32) + pts_ms (u64) + packet_data (N bytes)
-    """
-    header = struct.pack("<I I", packet_type, len(packet_data))
-    header += struct.pack("<Q", pts_ms)
-    return header + packet_data
+
+def _build_media_asset_block(
+    segment_id: str,
+    media_payload: bytes,
+    container: str | int = CONTAINER_FMP4,
+) -> bytes:
+    return _build_block_header(segment_id, container) + media_payload
 
 
 def _build_segment_block(
     segment_id: str,
-    video_packets: list[dict[str, Any]],
-    audio_packets: list[dict[str, Any]],
-    codec_video: int = CODEC_H264,
-    codec_audio: int = CODEC_AAC_LC,
+    media_payload: bytes | None = None,
+    container: str | int = CONTAINER_FMP4,
+    **legacy_packet_args: Any,
 ) -> bytes:
-    """Build a segment data block with real encoded packet data.
+    """Compatibility wrapper for one BVF media asset block."""
+    if media_payload is None:
+        media_payload = legacy_packet_args.pop("media_payload", None)
+    if media_payload is None:
+        if legacy_packet_args:
+            raise ValueError("BVF media assets require media_payload, not packets")
+        media_payload = b""
+    return _build_media_asset_block(segment_id, media_payload, container)
 
-    Parameters
-    ----------
-    segment_id : str
-        Segment identifier (must be <= 16 chars).
-    video_packets : list[dict]
-        List of video packet dicts, each with:
-        - "pts_ms" (int): presentation timestamp in milliseconds
-        - "data" (bytes): raw codec bitstream data (e.g. H.264 Annex B)
-    audio_packets : list[dict]
-        List of audio packet dicts, each with:
-        - "pts_ms" (int): presentation timestamp in milliseconds
-        - "data" (bytes): raw codec frame data (e.g. AAC ADTS, Opus)
-    codec_video : int
-        Video codec identifier (e.g. CODEC_H264).
-    codec_audio : int
-        Audio codec identifier (e.g. CODEC_AAC_LC).
 
-    Returns
-    -------
-    bytes
-        Complete segment data block: 32-byte header + video packets + audio packets.
-    """
-    block_header = _build_block_header(segment_id, codec_video, codec_audio)
-
-    # Pack all video packets
-    video_data = b""
-    for pkt in video_packets:
-        pts_ms = pkt.get("pts_ms", 0)
-        data = pkt.get("data", b"")
-        video_data += _build_packet(PACKET_VIDEO, data, pts_ms)
-
-    # Pack all audio packets
-    audio_data = b""
-    for pkt in audio_packets:
-        pts_ms = pkt.get("pts_ms", 0)
-        data = pkt.get("data", b"")
-        audio_data += _build_packet(PACKET_AUDIO, data, pts_ms)
-
-    return block_header + video_data + audio_data
+def _build_packet(packet_type: int, packet_data: bytes, pts_ms: int) -> bytes:
+    raise ValueError("BVF v1 stores fMP4/CMAF media assets, not raw packets")
 
 
 def _build_stub_segment_block(
     segment_id: str,
-    codec_video: int = CODEC_H264,
-    codec_audio: int = CODEC_AAC_LC,
+    container: str | int = CONTAINER_FMP4,
 ) -> bytes:
-    """Build a minimal placeholder segment data block.
-
-    Contains a block header + one video marker packet + one audio marker packet.
-    Used when real segment data is not yet available.
-
-    .. deprecated::
-        Use :func:`_build_segment_block` with real packet data instead.
-    """
-    block_header = _build_block_header(segment_id, codec_video, codec_audio)
-    # Marker video packet (1 byte of dummy data)
-    video_packet = _build_packet(PACKET_VIDEO, b"\x00", 0)
-    # Marker audio packet (1 byte of dummy data)
-    audio_packet = _build_packet(PACKET_AUDIO, b"\x00", 0)
-    return block_header + video_packet + audio_packet
+    return _build_media_asset_block(segment_id, b"", container)
 
 
 def _build_manifest_json(
@@ -239,9 +233,10 @@ def _build_manifest_json(
     video_info: dict[str, Any] | None = None,
     chapters: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    """Build the uncompressed manifest JSON and return it as UTF-8 bytes."""
     manifest: dict[str, Any] = {
         "bvf_version": "1.0",
+        "media_model": "asset-blocks",
+        "preferred_container": "fmp4",
         "movie_id": movie_id,
         "title": title,
         "duration_ms": duration_ms,
@@ -253,28 +248,15 @@ def _build_manifest_json(
         manifest["video_info"] = video_info
     if chapters is not None:
         manifest["chapters"] = chapters
-
     return json.dumps(manifest, ensure_ascii=False).encode("utf-8")
 
 
 def _compress_manifest(data: bytes) -> bytes:
-    """Compress manifest data with zstandard."""
-    cctx = zstandard.ZstdCompressor(level=3)
-    return cctx.compress(data)
+    return zstandard.ZstdCompressor(level=3).compress(data)
 
 
 class BvfMuxer:
-    """Muxes segment data into a .bvf file.
-
-    Usage:
-        muxer = BvfMuxer(movie_id="tt1234567", title="My Movie")
-        muxer.write_bvf(
-            output_path="output.bvf",
-            segments=segment_list,
-            duration_seconds=7200.0,
-            profiles=profiles_dict,
-        )
-    """
+    """Mux segment metadata and standard media fragments into one BVF file."""
 
     def __init__(
         self,
@@ -282,12 +264,14 @@ class BvfMuxer:
         title: str = "Untitled",
         codec_video: int = CODEC_H264,
         codec_audio: int = CODEC_AAC_LC,
+        container: str | int = CONTAINER_FMP4,
         flags: int = DEFAULT_FLAGS,
     ):
         self.movie_id = movie_id
         self.title = title
         self.codec_video = codec_video
         self.codec_audio = codec_audio
+        self.container = _container_id(container)
         self.flags = flags
 
     def write_bvf(
@@ -299,47 +283,10 @@ class BvfMuxer:
         video_info: dict[str, Any] | None = None,
         chapters: list[dict[str, Any]] | None = None,
     ) -> Path:
-        """Write a complete .bvf file.
-
-        Parameters
-        ----------
-        output_path : str | Path
-            Destination .bvf file path.
-        segments : list[dict]
-            Segment data from the analyzer. Each dict must contain:
-              - id (str): unique segment identifier
-              - start_time (float): start time in seconds
-              - end_time (float): end time in seconds
-              - tags (list[str]): content tags
-              - risk (str): "safe" or "mature"
-              - action (str): "play", "swap", "skip", or "mute"
-              - profile_segment_id (str, optional): target segment_id for swap/skip
-              - video_packets (list[dict], optional): real video packet data
-                each with {"pts_ms": int, "data": bytes}
-              - audio_packets (list[dict], optional): real audio packet data
-                each with {"pts_ms": int, "data": bytes}
-        duration_seconds : float
-            Total duration of the original video in seconds.
-        profiles : dict
-            Viewer profile definitions. Keys are profile names, values are dicts
-            with at least "label" and "filters".
-        video_info : dict, optional
-            Video metadata (width, height, frame_rate, color_space).
-        chapters : list[dict], optional
-            Chapter definitions with title, start_ms, end_ms.
-
-        Returns
-        -------
-        Path
-            Path to the written .bvf file.
-        """
         output_path = Path(output_path)
         total_duration_ms = int(duration_seconds * 1000)
 
-        # --- Step 1: Build manifest (uncompressed, then compressed) ---
-        manifest_entries = self._build_manifest_segments(
-            segments, profiles, total_duration_ms
-        )
+        manifest_entries = self._build_manifest_segments(segments, profiles)
         manifest_json = _build_manifest_json(
             movie_id=self.movie_id,
             title=self.title,
@@ -351,44 +298,31 @@ class BvfMuxer:
         )
         manifest_compressed = _compress_manifest(manifest_json)
 
-        # --- Step 2: Build segment data blocks (real or stub) ---
         segment_blocks: list[bytes] = []
         for seg in segments:
-            video_packets = seg.get("video_packets")
-            audio_packets = seg.get("audio_packets")
-            if video_packets is not None and audio_packets is not None:
-                # Use real packet data
-                block = _build_segment_block(
-                    seg["id"], video_packets, audio_packets,
-                    self.codec_video, self.codec_audio
-                )
-            else:
-                # Fall back to stub for backward compatibility
-                block = _build_stub_segment_block(
-                    seg["id"], self.codec_video, self.codec_audio
-                )
-            segment_blocks.append(block)
+            payload = seg.get("media_payload")
+            if payload is None and "media_path" in seg:
+                payload = Path(seg["media_path"]).read_bytes()
+            if payload is None:
+                payload = b""
+            container = seg.get("media_container", self.container)
+            segment_blocks.append(_build_media_asset_block(seg["id"], payload, container))
 
-        # --- Step 3: Compute layout ---
-        # File header: 64 bytes
-        file_header_size = FILE_HEADER_SIZE
-
-        # Segment index: segment_count * 40 bytes
         segment_count = len(segments)
+        index_offset = FILE_HEADER_SIZE
         index_size = segment_count * INDEX_ENTRY_SIZE
-
-        # Manifest follows the index
-        index_offset = file_header_size
         manifest_offset = index_offset + index_size
         manifest_length = len(manifest_compressed)
-
-        # Segment blocks start after manifest
         blocks_offset = manifest_offset + manifest_length
 
-        # --- Step 4: Write file ---
+        offsets: list[int] = []
+        cursor = blocks_offset
+        for block in segment_blocks:
+            offsets.append(cursor)
+            cursor += len(block)
+
         with open(output_path, "wb") as f:
-            # 4a. Write file header with placeholder index/manifest offsets
-            placeholder_header = _build_file_header(
+            f.write(_build_file_header(
                 segment_count=segment_count,
                 total_duration_ms=total_duration_ms,
                 index_offset=index_offset,
@@ -396,40 +330,13 @@ class BvfMuxer:
                 manifest_offset=manifest_offset,
                 manifest_length=manifest_length,
                 flags=self.flags,
-            )
-            f.write(placeholder_header)
-
-            # 4b. Write segment index with placeholder offsets
-            for i, seg in enumerate(segments):
-                entry = _build_index_entry(
-                    segment_id=seg["id"],
-                    data_offset=0,  # placeholder — backfilled below
-                    data_length=0,  # placeholder
-                    duration_ms=self._segment_duration_ms(seg),
-                )
-                f.write(entry)
-
-            # 4c. Write compressed manifest
+            ))
+            for seg, block, offset in zip(segments, segment_blocks, offsets):
+                f.write(_build_index_entry(
+                    seg["id"], offset, len(block), self._segment_duration_ms(seg)
+                ))
             f.write(manifest_compressed)
-
-            # 4d. Write segment data blocks and record real offsets
-            for i, block in enumerate(segment_blocks):
-                seg = segments[i]
-                block_offset = blocks_offset + sum(len(b) for b in segment_blocks[:i])
-                block_length = len(block)
-
-                # Backfill index entry with real offset
-                f.seek(index_offset + i * INDEX_ENTRY_SIZE)
-                entry = _build_index_entry(
-                    segment_id=seg["id"],
-                    data_offset=block_offset,
-                    data_length=block_length,
-                    duration_ms=self._segment_duration_ms(seg),
-                )
-                f.write(entry)
-
-                # Write the actual block
-                f.seek(block_offset)
+            for block in segment_blocks:
                 f.write(block)
 
         return output_path
@@ -440,15 +347,13 @@ class BvfMuxer:
             return int((seg["end_time"] - seg["start_time"]) * 1000)
         if seg.get("start_ms") is not None and seg.get("end_ms") is not None:
             return int(seg["end_ms"] - seg["start_ms"])
-        return 0
+        return int(seg.get("duration_ms", 0))
 
     def _build_manifest_segments(
         self,
         segments: list[dict[str, Any]],
         profiles: dict[str, Any],
-        total_duration_ms: int,
     ) -> list[dict[str, Any]]:
-        """Build manifest segment entries from analyzer segment data."""
         profile_names = list(profiles.keys())
         manifest_segments = []
 
@@ -464,7 +369,6 @@ class BvfMuxer:
             risk = seg.get("risk", "safe")
             action = seg.get("action", "play")
             profile_segment_id = seg.get("profile_segment_id", seg_id)
-            # Validate risk and action
             _risk_to_int(risk)
             _action_to_int(action)
 
@@ -473,30 +377,48 @@ class BvfMuxer:
                 for profile_data in profile_entries.values():
                     _action_to_int(profile_data.get("action", "play"))
             else:
-                # Build per-profile entries from each profile's filters. Profiles
-                # that do not filter this segment's tags play the original segment.
                 profile_entries = {}
                 tag_set = set(tags)
                 for pname in profile_names:
-                    filters = set(profiles.get(pname, {}).get("filters", []))
-                    should_filter = risk != "safe" and (not tag_set or bool(tag_set & filters))
-                    resolved_action = action if should_filter else "play"
+                    filter_actions = _normalize_profile_filters(
+                        profiles.get(pname, {}).get("filters", {})
+                    )
+                    matching_actions = [
+                        filter_actions[tag] or action
+                        for tag in tag_set
+                        if tag in filter_actions
+                    ]
+                    if risk != "safe" and not tag_set and action != "play":
+                        matching_actions = [action]
+                    resolved_action = _most_restrictive_action(
+                        matching_actions, default_action=action
+                    )
                     resolved_segment_id = (
-                        profile_segment_id
-                        if resolved_action in {"swap", "skip"}
-                        else seg_id
+                        profile_segment_id if resolved_action == "swap" else seg_id
                     )
                     profile_entries[pname] = {
                         "action": resolved_action,
                         "segment_id": resolved_segment_id,
                     }
 
+            container = seg.get("media_container", self.container)
             entry: dict[str, Any] = {
                 "id": seg_id,
                 "start_ms": start_ms,
                 "end_ms": end_ms,
                 "tags": tags,
                 "risk": risk,
+                "media": {
+                    "asset_id": seg_id,
+                    "container": _container_name(container),
+                    "mime_type": (
+                        "video/mp4"
+                        if _container_id(container) == CONTAINER_FMP4
+                        else "video/mp2t"
+                    ),
+                    "codec_video": self.codec_video,
+                    "codec_audio": self.codec_audio,
+                },
                 "profiles": profile_entries,
             }
             if seg.get("is_filler", False):
@@ -507,43 +429,35 @@ class BvfMuxer:
 
     @staticmethod
     def read_bvf(input_path: str | Path) -> dict[str, Any]:
-        """Read and parse a .bvf file for verification/testing.
-
-        Returns a dict with:
-          - header: dict of header fields
-          - segments: list of index entries
-          - manifest: parsed JSON manifest
-        """
         input_path = Path(input_path)
         with open(input_path, "rb") as f:
-            # Read file header
             header_data = f.read(FILE_HEADER_SIZE)
             header = _parse_file_header(header_data)
 
-            # Read segment index
             f.seek(header["index_offset"])
             index_entries = []
             for _ in range(header["segment_count"]):
-                entry_data = f.read(INDEX_ENTRY_SIZE)
-                entry = _parse_index_entry(entry_data)
-                index_entries.append(entry)
+                index_entries.append(_parse_index_entry(f.read(INDEX_ENTRY_SIZE)))
 
-            # Read and decompress manifest
             f.seek(header["manifest_offset"])
             compressed = f.read(header["manifest_length"])
-            dctx = zstandard.ZstdDecompressor()
-            manifest_json = dctx.decompress(compressed)
+            manifest_json = zstandard.ZstdDecompressor().decompress(compressed)
             manifest = json.loads(manifest_json.decode("utf-8"))
+
+            asset_headers = []
+            for entry in index_entries:
+                f.seek(entry["data_offset"])
+                asset_headers.append(_parse_block_header(f.read(ASSET_BLOCK_HEADER_SIZE)))
 
         return {
             "header": header,
             "segments": index_entries,
+            "asset_headers": asset_headers,
             "manifest": manifest,
         }
 
 
 def _parse_file_header(data: bytes) -> dict[str, Any]:
-    """Parse a 64-byte file header into a dict."""
     (
         magic,
         version_major,
@@ -574,7 +488,6 @@ def _parse_file_header(data: bytes) -> dict[str, Any]:
 
 
 def _parse_index_entry(data: bytes) -> dict[str, Any]:
-    """Parse a 40-byte index entry into a dict."""
     segment_id_bytes, data_offset, data_length, duration_ms = struct.unpack(
         "<16s Q Q Q", data
     )
@@ -586,34 +499,15 @@ def _parse_index_entry(data: bytes) -> dict[str, Any]:
     }
 
 
-def main():
-    """CLI entry point for testing the BVF muxer."""
-    import argparse
-
+def main() -> None:
     parser = argparse.ArgumentParser(description="BVF Muxer CLI")
-    parser.add_argument(
-        "--output", "-o", default="output.bvf", help="Output .bvf file path"
-    )
-    parser.add_argument(
-        "--movie-id", default="tt0000000", help="Movie ID (default: tt0000000)"
-    )
-    parser.add_argument(
-        "--title", default="Test Movie", help="Movie title (default: Test Movie)"
-    )
-    parser.add_argument(
-        "--duration",
-        type=float,
-        default=360.0,
-        help="Total duration in seconds (default: 360)",
-    )
-    parser.add_argument(
-        "--test-read",
-        action="store_true",
-        help="Read back the file and print info after writing",
-    )
+    parser.add_argument("--output", "-o", default="output.bvf")
+    parser.add_argument("--movie-id", default="tt0000000")
+    parser.add_argument("--title", default="Test Movie")
+    parser.add_argument("--duration", type=float, default=360.0)
+    parser.add_argument("--test-read", action="store_true")
     args = parser.parse_args()
 
-    # Create test segments
     segments = [
         {
             "id": "seg_001",
@@ -629,8 +523,7 @@ def main():
             "end_time": 180.0,
             "tags": ["violence", "language"],
             "risk": "mature",
-            "action": "swap",
-            "profile_segment_id": "filler_001",
+            "action": "skip",
         },
         {
             "id": "seg_003",
@@ -641,43 +534,18 @@ def main():
             "action": "play",
         },
     ]
-
     profiles = {
-        "child": {
-            "label": "Child (under 13)",
-            "filters": ["nudity", "violence", "language", "fear", "gore"],
-        },
-        "teen": {
-            "label": "Teen (13-17)",
-            "filters": ["nudity", "gore"],
-        },
-        "adult": {
-            "label": "Adult (18+)",
-            "filters": [],
-        },
+        "child": {"name": "Child", "filters": {"violence": "skip", "language": "mute"}},
+        "adult": {"name": "Adult", "filters": {}},
     }
-
-    muxer = BvfMuxer(
-        movie_id=args.movie_id,
-        title=args.title,
-    )
-    out = muxer.write_bvf(
-        output_path=args.output,
-        segments=segments,
-        duration_seconds=args.duration,
-        profiles=profiles,
+    out = BvfMuxer(movie_id=args.movie_id, title=args.title).write_bvf(
+        args.output, segments, args.duration, profiles
     )
     print(f"Wrote {out} ({out.stat().st_size} bytes)")
-
     if args.test_read:
         parsed = BvfMuxer.read_bvf(out)
-        print(f"\nHeader: {json.dumps(parsed['header'], indent=2)}")
-        print(f"\nSegments ({len(parsed['segments'])}):")
-        for seg in parsed["segments"]:
-            print(f"  {seg['segment_id']}: offset={seg['data_offset']}, "
-                  f"length={seg['data_length']}, duration={seg['duration_ms']}ms")
-        print(f"\nManifest title: {parsed['manifest']['title']}")
-        print(f"Manifest segments: {len(parsed['manifest']['segments'])}")
+        print(json.dumps(parsed["header"], indent=2))
+        print(f"Manifest title: {parsed['manifest']['title']}")
 
 
 if __name__ == "__main__":

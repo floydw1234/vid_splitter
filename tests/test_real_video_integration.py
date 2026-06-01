@@ -10,6 +10,7 @@ Outputs are written to a persistent directory for inspection.
 """
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 ROOT = Path(__file__).resolve().parents[1]
 VIDEO = ROOT / "videos" / "goldylocks.mp4"
 OUTPUT_DIR = ROOT / "test_outputs" / "real_video_integration"
+RUN_REAL_ANALYZERS = os.environ.get("RUN_REAL_ANALYZER_TESTS") == "1"
 
 
 def _run(cmd: list[str], cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -36,6 +38,10 @@ def _run(cmd: list[str], cwd: Path = ROOT, check: bool = True) -> subprocess.Com
     return result
 
 
+@pytest.mark.skipif(
+    not RUN_REAL_ANALYZERS,
+    reason="set RUN_REAL_ANALYZER_TESTS=1 to run heavyweight real analyzer tests",
+)
 @pytest.mark.skipif(
     not VIDEO.exists(),
     reason=f"Real video not found: {VIDEO}",
@@ -82,6 +88,10 @@ def test_whisper_safety_checker_pipeline():
     logger.info(f"Whisper exports: child={child_export.stat().st_size/1024/1024:.1f}MB, adult={adult_export.stat().st_size/1024/1024:.1f}MB")
 
 
+@pytest.mark.skipif(
+    not RUN_REAL_ANALYZERS,
+    reason="set RUN_REAL_ANALYZER_TESTS=1 to run heavyweight real analyzer tests",
+)
 @pytest.mark.skipif(
     not VIDEO.exists(),
     reason=f"Real video not found: {VIDEO}",

@@ -30,54 +30,23 @@ public class ProfileResolver
             config.UserProfiles.TryGetValue(userId, out var stored))
         {
             // 1. Explicit override wins
-            if (!string.IsNullOrEmpty(stored.ProfileOverride) &&
-                manifest.Profiles.ContainsKey(stored.ProfileOverride))
-                return stored.ProfileOverride;
+            if (!string.IsNullOrEmpty(stored.ProfileOverride))
+                return SelectAvailableProfile(manifest.Profiles, stored.ProfileOverride);
 
             // 2. Auto-resolve from birthday + sex
             if (!string.IsNullOrEmpty(stored.Birthday) &&
                 DateOnly.TryParse(stored.Birthday, out var dob))
             {
                 var age = CalculateAge(dob);
-                return ResolveFromAgeSex(age, stored.Sex ?? "unset");
+                return SelectAvailableProfile(manifest.Profiles, ResolveFromAgeSex(age, stored.Sex ?? "unset"));
             }
         }
 
         // 3. Fall back to the plugin's default profile
-        return config?.DefaultProfile ?? "adult";
+        return SelectAvailableProfile(manifest.Profiles, config?.DefaultProfile);
     }
 
-    /// <summary>
-    /// Maps a Jellyfin user to a branch profile key for BVF manifests.
-    /// For BVF, the manifest already has profile definitions, so we just
-    /// need to map the user to one of those profile keys.
-    /// </summary>
-    public string ResolveProfileForBvf(UserDto user, BVFManifest manifest)
-    {
-        var config = Plugin.Instance?.Configuration;
-        var userId = user.Id.ToString();
-
-        if (config?.UserProfiles != null &&
-            config.UserProfiles.TryGetValue(userId, out var stored))
-        {
-            // 1. Explicit override wins when the BVF contains that profile.
-            if (!string.IsNullOrEmpty(stored.ProfileOverride))
-                return SelectAvailableBvfProfile(manifest.Profiles, stored.ProfileOverride);
-
-            // 2. Auto-resolve from birthday + sex, then map to an available BVF profile.
-            if (!string.IsNullOrEmpty(stored.Birthday) &&
-                DateOnly.TryParse(stored.Birthday, out var dob))
-            {
-                var age = CalculateAge(dob);
-                return SelectAvailableBvfProfile(manifest.Profiles, ResolveFromAgeSex(age, stored.Sex ?? "unset"));
-            }
-        }
-
-        // 3. Honor the configured default when available, otherwise pick a stable fallback.
-        return SelectAvailableBvfProfile(manifest.Profiles, config?.DefaultProfile);
-    }
-
-    private static string SelectAvailableBvfProfile(Dictionary<string, BVFProfile> profiles, string? preferred)
+    private static string SelectAvailableProfile(Dictionary<string, UserProfile> profiles, string? preferred)
     {
         if (!string.IsNullOrEmpty(preferred) && profiles.ContainsKey(preferred))
             return preferred;
@@ -120,101 +89,4 @@ public class ProfileResolver
         return age;
     }
 
-    /// <summary>
-    /// Resolves which file path to serve for a segment given a user profile.
-    /// </summary>
-    public ResolvedSegment ResolveSegment(Segment segment, string profile, string movieDirectory, string fillerDirectory)
-    {
-        var resolved = new ResolvedSegment { Source = segment };
-
-        if (segment.Risk == "safe" || segment.Action == "play")
-        {
-            // Play the original segment
-            resolved.ResolvedPath = GetSegmentPath(movieDirectory, segment.Id);
-            resolved.IsSwapped = false;
-            resolved.SwapType = "original";
-            return resolved;
-        }
-
-        // Mature content — check if this profile filters it
-        var profileFilters = GetProfileFilters(profile);
-        var matchingTags = segment.Tags.Intersect(profileFilters).ToList();
-
-        if (!matchingTags.Any())
-        {
-            // Profile doesn't filter these tags — play original
-            resolved.ResolvedPath = GetSegmentPath(movieDirectory, segment.Id);
-            resolved.IsSwapped = false;
-            resolved.SwapType = "original";
-            return resolved;
-        }
-
-        // Profile filters these tags — check swap options
-        if (segment.SwapOptions != null && segment.SwapOptions.ContainsKey(profile))
-        {
-            var swapChoice = segment.SwapOptions[profile];
-            if (swapChoice == "original")
-            {
-                resolved.ResolvedPath = GetSegmentPath(movieDirectory, segment.Id);
-                resolved.IsSwapped = false;
-                resolved.SwapType = "original";
-            }
-            else if (swapChoice.StartsWith("filler_"))
-            {
-                resolved.ResolvedPath = GetFillerPath(fillerDirectory, swapChoice);
-                resolved.IsSwapped = true;
-                resolved.SwapType = "filler";
-            }
-            else
-            {
-                // Unknown swap option — skip
-                resolved.ResolvedPath = string.Empty;
-                resolved.IsSwapped = true;
-                resolved.SwapType = "skip";
-            }
-        }
-        else
-        {
-            // No swap option defined — skip by default
-            resolved.ResolvedPath = string.Empty;
-            resolved.IsSwapped = true;
-            resolved.SwapType = "skip";
-        }
-
-        return resolved;
-    }
-
-    /// <summary>
-    /// Gets the list of filter tags for a profile key.
-    /// </summary>
-    private static List<string> GetProfileFilters(string profile)
-    {
-        return profile switch
-        {
-            "child" => new List<string> { "nudity", "violence", "language", "fear" },
-            "teen_m" => new List<string> { "nudity", "gore" },
-            "teen_f" => new List<string> { "nudity", "violence" },
-            "adult" => new List<string>(),
-            _ => new List<string>()
-        };
-    }
-
-    /// <summary>
-    /// Constructs the path to a segment file.
-    /// Segments are stored in the same directory as the movie.
-    /// </summary>
-    private static string GetSegmentPath(string movieDirectory, string segmentId)
-    {
-        if (!int.TryParse(segmentId.Split('_').LastOrDefault(), out var index))
-            index = 0;
-        return Path.Combine(movieDirectory, $"seg_{index:000}.ts");
-    }
-
-    /// <summary>
-    /// Gets the path to a filler video.
-    /// </summary>
-    private static string GetFillerPath(string fillerDirectory, string fillerName)
-    {
-        return Path.Combine(fillerDirectory, $"{fillerName}.ts");
-    }
 }

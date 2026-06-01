@@ -22,14 +22,14 @@
                           │ drops .bvf file next to the movie
                           v
 ┌──────────────────────────────────────────────────────────────────┐
-│  Jellyfin Server (.NET 9)                                         │
+│  Jellyfin Server (.NET 8)                                         │
 │                                                                  │
 │  Smart Branching Plugin (C#):                                    │
-│    1. On startup: scans library for .bvf files                   │
-│    2. Registers "Smart Branch" virtual MediaSource per movie     │
-│    3. On Play: reads BVF container, resolves segments for user   │
+│    1. MediaSource provider checks each movie for sibling .bvf    │
+│    2. Exposes one "Smart Branch" media source per BVF profile    │
+│    3. On Play: opens the selected profile source                 │
 │    4. Serves resolved segments through Jellyfin's streaming pipe │
-│    5. Mature segments → swap with filler or skip                 │
+│    5. Mature segments → swap, skip, mute, or blur as configured  │
 │                                                                  │
 │  No external services. No Python server. Pure Jellyfin.          │
 └──────────────────────────────────────────────────────────────────┘
@@ -41,30 +41,34 @@ The project uses **BVF** (`.bvf`) — a self-contained binary container format.
 See [BVF_SPEC.md](BVF_SPEC.md) for the full specification.
 
 **Key properties:**
-- One file holds everything: all segments (main + fillers + alternates), manifest, and index
-- File layout: 64-byte header → segment index (40-byte fixed entries) → zstd-compressed JSON manifest → sequential segment data blocks
+- One file holds everything: fMP4/CMAF media assets (main + fillers + alternates), manifest, and index
+- File layout: 64-byte header → segment index (40-byte fixed entries) → zstd-compressed JSON manifest → sequential media asset blocks
 - O(1) random access by byte offset via segment index
 - Profile-aware: multiple viewer profiles with different tag filters in one file
 - Keyframe-aligned: every segment boundary is an IDR/keyframe for seamless seeking
 - Streamable: index lives near the front, playback can start before full download
+- Production media model: BVF stores standard fMP4/CMAF fragments, not raw codec packets
 
 **Manifest schema (zstd-compressed JSON):**
 ```json
 {
   "bvf_version": "1.0",
+  "media_model": "asset-blocks",
+  "preferred_container": "fmp4",
   "movie_id": "tt1234567",
   "title": "Example Movie",
   "duration_ms": 7200000,
   "profiles": {
-    "child": { "label": "Child (under 13)", "filters": ["nudity", "violence", "language", "fear", "gore"] },
-    "teen":  { "label": "Teen (13–17)",     "filters": ["nudity", "gore"] },
-    "adult": { "label": "Adult (18+)",       "filters": [] }
+    "child": { "name": "Child (under 13)", "filters": { "nudity": "swap", "violence": "blur", "language": "mute", "fear": "skip", "gore": "skip" } },
+    "teen":  { "name": "Teen (13-17)",     "filters": { "nudity": "swap", "gore": "skip" } },
+    "adult": { "name": "Adult (18+)",      "filters": {} }
   },
   "segments": [
     {
       "id": "seg_001",
       "start_ms": 0, "end_ms": 300000,
       "tags": [], "risk": "safe",
+      "media": { "asset_id": "seg_001", "container": "fmp4", "mime_type": "video/mp4" },
       "profiles": {
         "child": { "action": "play", "segment_id": "seg_001" },
         "teen":  { "action": "play", "segment_id": "seg_001" },
@@ -75,6 +79,7 @@ See [BVF_SPEC.md](BVF_SPEC.md) for the full specification.
       "id": "seg_002",
       "start_ms": 300000, "end_ms": 345000,
       "tags": ["violence", "gore"], "risk": "mature",
+      "media": { "asset_id": "seg_002", "container": "fmp4", "mime_type": "video/mp4" },
       "profiles": {
         "child": { "action": "swap", "segment_id": "filler_001" },
         "teen":  { "action": "swap", "segment_id": "filler_001" },
@@ -150,23 +155,29 @@ The implementation should treat Marlin-2B output as content-understanding eviden
 ## 5. Component 2: The Jellyfin Plugin (C#)
 **Directory:** `csharp_plugin/`
 **Purpose:** Native Jellyfin plugin that intercepts playback and serves profile-filtered content.
+**Target:** Jellyfin 10.9 / `net8.0`.
 
 ### Key Classes
 | Class | Purpose |
 |-------|---------|
-| `Plugin` | Entry point — scans library on startup, registers virtual sources |
-| `ManifestScanner` | Finds `.bvf` files alongside movie files |
+| `Plugin` | Entry point and configuration page registration |
 | `BVFReader` | Parses BVF binary format: reads header, index, decompresses manifest |
 | `ProfileResolver` | Maps Jellyfin users to branch profiles, resolves segment actions |
-| `SegmentServer` | Serves resolved segments through Jellyfin's streaming pipeline |
+| `SegmentServer` | MediaSource provider that finds sibling `.bvf` files and serves resolved segments through Jellyfin's streaming pipeline |
 
 ### How Playback Works
 1. User clicks "Play" on a movie
-2. Plugin checks for `.bvf` in the same directory
-3. If found, registers a "Smart Branch" virtual MediaSource
-4. On playback start, `BVFReader` parses header + index, `ProfileResolver` resolves segments
+2. `SegmentServer` checks for `.bvf` in the same directory
+3. If found, exposes one "Smart Branch" MediaSource per manifest profile
+4. On playback start, `BVFReader` parses header + index and resolves the selected profile's manifest actions
 5. Segments are served through Jellyfin's native streaming (no external proxy)
-6. Mature segments are swapped with fillers or skipped based on profile filters
+6. Mature segments are swapped, skipped, muted, or blurred based on profile filters
+
+The Jellyfin 10.9 `IMediaSourceProvider` API does not pass the requesting user
+into `OpenMediaSource`, so automatic per-user source selection is not available
+on this hook alone. The plugin still keeps `ProfileResolver` for user-aware
+resolution, and the playback path exposes profile-specific Smart Branch sources
+so every manifest profile can be played through Jellyfin.
 
 ### Configuration — User Profile System
 The plugin now uses **explicit user profiles** (birthday + sex) instead of Jellyfin's parental rating ceiling:
@@ -192,8 +203,8 @@ The plugin now uses **explicit user profiles** (birthday + sex) instead of Jelly
 ```bash
 cd csharp_plugin
 dotnet build -c Release
-# Copy SmartBranching.Plugin.dll to Jellyfin's plugin directory
-# e.g., /usr/share/jellyfin/data/plugins/
+# Copy SmartBranching.Plugin.dll, SmartBranching.Plugin.deps.json,
+# and ZstdSharp.dll to the Jellyfin plugin directory.
 ```
 
 ## 6. Project Structure
@@ -213,14 +224,13 @@ vid_splitter/
 │   ├── Directory.Build.props
 │   ├── SmartBranching.Plugin.csproj
 │   ├── build.yaml            # Jellyfin plugin manifest
-│   ├── Plugin.cs             # Entry point + library scanning
+│   ├── Plugin.cs             # Entry point + config page registration
 │   ├── Configuration/
 │   │   ├── PluginConfiguration.cs   # UserBranchProfile + Dictionary<string, UserBranchProfile>
 │   │   └── configPage.html            # User profile table with live resolution
 │   ├── Models/
 │   │   └── BranchManifest.cs  # normalized branch manifest view
-│   ├── ManifestScanner.cs     # Scans library for .bvf files
-│   ├── BVFReader.cs           # Parses BVF binary format (header + index + manifest)
+│   ├── BVFReader.cs           # Linked from Assets/Scripts; parses BVF binary format
 │   ├── ProfileResolver.cs     # User → profile mapping (birthday+sex override system)
 │   └── SegmentServer.cs       # Serves resolved segments through Jellyfin
 │
@@ -243,8 +253,8 @@ vid_splitter/
 
 ### Phase 2: C# Plugin Skeleton ✅
 * [x] `csharp_plugin/` with official Jellyfin plugin template structure
-* [x] `Plugin.cs` — entry point, library scanning, virtual source registration
-* [x] `ManifestScanner.cs` — find `.bvf` files alongside movies
+* [x] `Plugin.cs` — entry point and config page registration
+* [x] `SegmentServer.cs` — Jellyfin media source provider that finds `.bvf` files alongside movies
 * [x] `ProfileResolver.cs` — user-to-profile mapping (birthday+sex override system)
 * [x] `Configuration/` — config page with live profile resolution
 * [x] BVF binary format support (header + index + manifest parsing)
@@ -272,9 +282,9 @@ vid_splitter/
 ## 8. User Workflow
 1. **Owner:** Runs `python analyze.py "ActionMovie.mp4"`
 2. **Result:** `ActionMovie.bvf` (self-contained, all segments + manifest in one file) created next to the movie
-3. **C# Plugin:** Automatically detects the `.bvf` file on next library scan
-4. **Viewer:** Logs into Jellyfin as "Child" (profile auto-resolved from birthday + sex)
-5. **Playback:** Clicks "Play" → plugin routes through BVF reader + segment server → child-safe stream
+3. **C# Plugin:** Exposes Smart Branch profile sources when Jellyfin asks for media sources for that movie
+4. **Viewer:** Selects the Smart Branch profile source that matches their intended profile
+5. **Playback:** Clicks "Play" → plugin routes through BVF reader + segment server → profile-filtered stream
 6. **Experience:** Movie plays normally, violence/language scenes are swapped with fillers or skipped
 
 ## 9. Constraints & Notes

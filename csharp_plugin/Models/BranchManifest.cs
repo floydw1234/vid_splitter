@@ -6,7 +6,7 @@ namespace Jellyfin.Plugin.SmartBranching.Models;
 
 /// <summary>
 /// Normalized branch manifest structure derived from a BVF container.
-/// Used by scanner and profile-resolution paths that operate on timeline segments.
+/// Used by profile-resolution paths that operate on timeline segments.
 /// </summary>
 public class BranchManifest
 {
@@ -41,7 +41,7 @@ public class UserProfile
     public string Gender { get; set; } = string.Empty;
 
     [JsonPropertyName("filters")]
-    public List<string> Filters { get; set; } = new();
+    public Dictionary<string, string> Filters { get; set; } = new();
 }
 
 /// <summary>
@@ -63,12 +63,6 @@ public class Segment
 
     [JsonPropertyName("risk")]
     public string Risk { get; set; } = string.Empty;
-
-    [JsonPropertyName("action")]
-    public string Action { get; set; } = string.Empty;
-
-    [JsonPropertyName("swap_options")]
-    public Dictionary<string, string>? SwapOptions { get; set; }
 
     [JsonPropertyName("profiles")]
     public Dictionary<string, SegmentProfileAction> Profiles { get; set; } = new();
@@ -97,6 +91,7 @@ public class ResolvedSegment
     public Segment Source { get; set; } = new();
     public string ResolvedPath { get; set; } = string.Empty;
     public bool IsSwapped { get; set; }
+    public string Action { get; set; } = "play";
     public string SwapType { get; set; } = string.Empty; // "filler", "original", "skip"
     public string SegmentId { get; set; } = string.Empty;
     public ulong DataOffset { get; set; }

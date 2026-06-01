@@ -54,7 +54,7 @@ namespace Jellyfin.Plugin.SmartBranching
         /// <param name="startTime">Start time in seconds.</param>
         /// <param name="endTime">End time in seconds.</param>
         /// <param name="classification">Classification from manifest risk field.</param>
-        /// <param name="audioHash">SHA256 hex digest of audio packet data.</param>
+        /// <param name="audioHash">SHA256 hex digest of the media asset payload.</param>
         /// <param name="segmentId">Unique segment identifier from the segment index.</param>
         /// <param name="durationMs">Segment duration in milliseconds.</param>
         /// <param name="dataOffset">Offset of the segment data block.</param>

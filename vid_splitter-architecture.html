@@ -110,7 +110,7 @@
         <!-- Jellyfin Server (right side) -->
         <rect x="580" y="30" width="600" height="760" rx="12"
               fill="rgba(6, 78, 59, 0.06)" stroke="#34d399" stroke-width="1" stroke-dasharray="8,4"/>
-        <text x="595" y="52" fill="#34d399" font-size="10" font-weight="600">PHASE 2: PLAYBACK (Jellyfin Server · .NET 9)</text>
+        <text x="595" y="52" fill="#34d399" font-size="10" font-weight="600">PHASE 2: PLAYBACK (Jellyfin Server · .NET 8)</text>
 
         <!-- =================================================================
              PHASE 1: PYTHON CLI COMPONENTS
@@ -181,27 +181,27 @@
         <!-- Jellyfin Server Core -->
         <rect x="610" y="80" width="540" height="60" rx="6"
               fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
-        <text x="880" y="103" fill="white" font-size="11" font-weight="600" text-anchor="middle">Jellyfin Server (.NET 9)</text>
+        <text x="880" y="103" fill="white" font-size="11" font-weight="600" text-anchor="middle">Jellyfin Server (.NET 8)</text>
         <text x="880" y="121" fill="#94a3b8" font-size="9" text-anchor="middle">MediaBrowser.Controller · Streaming Pipeline</text>
 
         <!-- Plugin Entry Point -->
         <rect x="610" y="180" width="240" height="60" rx="6"
               fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
         <text x="730" y="203" fill="white" font-size="11" font-weight="600" text-anchor="middle">Plugin.cs</text>
-        <text x="730" y="221" fill="#94a3b8" font-size="9" text-anchor="middle">Entry Point · Library Scan</text>
-        <text x="730" y="235" fill="#34d399" font-size="8" text-anchor="middle">OnStartup() → FindAllManifests()</text>
+        <text x="730" y="221" fill="#94a3b8" font-size="9" text-anchor="middle">Entry Point · Config Page</text>
+        <text x="730" y="235" fill="#34d399" font-size="8" text-anchor="middle">Plugin metadata</text>
 
-        <!-- Manifest Scanner -->
+        <!-- Segment Server -->
         <rect x="610" y="280" width="240" height="60" rx="6"
               fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
-        <text x="730" y="303" fill="white" font-size="11" font-weight="600" text-anchor="middle">ManifestScanner</text>
-        <text x="730" y="321" fill="#94a3b8" font-size="9" text-anchor="middle">Find .bvf</text>
-        <text x="730" y="335" fill="#34d399" font-size="8" text-anchor="middle">Per-video path resolution</text>
+        <text x="730" y="303" fill="white" font-size="11" font-weight="600" text-anchor="middle">SegmentServer</text>
+        <text x="730" y="321" fill="#94a3b8" font-size="9" text-anchor="middle">MediaSource Provider</text>
+        <text x="730" y="335" fill="#34d399" font-size="8" text-anchor="middle">Profile sources</text>
 
-        <!-- BVF Reader / Manifest Reader -->
+        <!-- BVF Reader -->
         <rect x="610" y="380" width="240" height="60" rx="6"
               fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
-        <text x="730" y="403" fill="white" font-size="11" font-weight="600" text-anchor="middle">ManifestReader / BVFReader</text>
+        <text x="730" y="403" fill="white" font-size="11" font-weight="600" text-anchor="middle">BVFReader</text>
         <text x="730" y="421" fill="#94a3b8" font-size="9" text-anchor="middle">Parse header + index + manifest</text>
         <text x="730" y="435" fill="#34d399" font-size="8" text-anchor="middle">zstd decompress · O(1) seek</text>
 
@@ -271,17 +271,17 @@
         <line x1="220" y1="670" x2="278" y2="410" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead-amber)" stroke-dasharray="4,3"/>
         <text x="230" y="560" fill="#fbbf24" font-size="8">filler refs</text>
 
-        <!-- BVF/Branch JSON → ManifestScanner (file discovery) -->
+        <!-- BVF → SegmentServer (file discovery) -->
         <line x1="520" y1="590" x2="608" y2="310" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)" stroke-dasharray="6,4"/>
         <text x="550" y="440" fill="#a78bfa" font-size="8">.bvf</text>
 
-        <!-- Plugin → ManifestScanner -->
+        <!-- Plugin → SegmentServer -->
         <line x1="730" y1="240" x2="730" y2="278" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
 
-        <!-- ManifestScanner → ManifestReader -->
+        <!-- SegmentServer → BVFReader -->
         <line x1="730" y1="340" x2="730" y2="378" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
 
-        <!-- ManifestReader → ProfileResolver -->
+        <!-- BVFReader → ProfileResolver -->
         <line x1="730" y1="440" x2="730" y2="478" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
 
         <!-- ProfileResolver → SegmentServer -->
@@ -369,8 +369,8 @@
           <h3>Playback Architecture</h3>
         </div>
         <ul>
-          <li>• Plugin scans Jellyfin library on startup for manifests</li>
-          <li>• Registers virtual "Smart Branch" media sources</li>
+          <li>• SegmentServer exposes sibling .bvf files as profile media sources</li>
+          <li>• Opens selected Smart Branch profile through Jellyfin</li>
           <li>• ProfileResolver maps users → child/teen/adult</li>
           <li>• SegmentServer swaps/skips mature content per profile</li>
           <li>• Filler videos replace flagged segments</li>
@@ -415,7 +415,7 @@
         </div>
         <ul>
           <li>• Python: whisper, diffusers, ffmpeg-python, torch, zstandard</li>
-          <li>• C#: .NET 9, Jellyfin SDK, System.Text.Json</li>
+          <li>• C#: .NET 8, Jellyfin SDK, System.Text.Json</li>
           <li>• Models: Whisper (base/small/medium), SD Safety Checker</li>
           <li>• GPU: Safety Checker can use CUDA for faster inference</li>
           <li>• Codec support: H.264, H.265, AV1, VP9 + AAC, Opus, AC-3</li>

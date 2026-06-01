@@ -80,16 +80,6 @@ DEFAULT_PROFILES = {
     },
 }
 
-# Tags that map to filter categories
-TAG_TO_FILTER = {
-    "language": "language",
-    "nudity": "nudity",
-    "violence": "violence",
-    "gore": "gore",
-    "fear": "fear",
-}
-
-
 class MovieAnalyzer:
     """Analyzes a video file for mature content and generates a branching manifest."""
 
@@ -180,7 +170,7 @@ class MovieAnalyzer:
         # 6. Generate manifest
         manifest = self._build_manifest(segments, duration)
 
-        self._attach_media_packets(manifest["segments"])
+        self._attach_media_assets(manifest["segments"])
 
         # 7. Save BVF container
         output_bvf = self._save_bvf(manifest)
@@ -811,8 +801,9 @@ class MovieAnalyzer:
                 "tags": seg.get("tags", []),
                 "topics": seg.get("topics", []),
                 "risk": seg.get("risk", "safe"),
-                "profiles": seg.get("profiles", {}),
             }
+            if seg.get("profiles"):
+                manifest_seg["profiles"] = seg["profiles"]
             manifest_segments.append(manifest_seg)
 
         # Log segment summary
@@ -860,7 +851,7 @@ class MovieAnalyzer:
                 "id": "seg_002",
                 "start_time": round(one_third, 2),
                 "end_time": round(one_third * 2, 2),
-                "tags": ["language"],
+                "tags": ["gore"],
                 "risk": "mature",
                 "action": "skip",
             },
@@ -878,28 +869,24 @@ class MovieAnalyzer:
             seg["id"] = f"seg_{i + 1:03d}"
 
         manifest = self._build_manifest(segments, duration)
-        self._attach_media_packets(manifest["segments"])
+        self._attach_media_assets(manifest["segments"])
         output_bvf = self._save_bvf(manifest)
         self.last_bvf_path = output_bvf
         logger.info(f"BVF saved to: {output_bvf}")
         return manifest
 
-    def _attach_media_packets(self, segments: list[dict]) -> None:
-        """Embed MPEG-TS media payloads for every segment in-place."""
+    def _attach_media_assets(self, segments: list[dict]) -> None:
+        """Embed self-contained fMP4/CMAF media assets for every segment."""
         with tempfile.TemporaryDirectory(prefix="bvf_analyzer_segments_") as tmp:
             tmp_dir = Path(tmp)
             for seg in segments:
-                segment_path = tmp_dir / f"{seg['id']}.ts"
+                segment_path = tmp_dir / f"{seg['id']}.mp4"
                 self._remux_segment(seg["start_time"], seg["end_time"], segment_path)
-                seg["video_packets"] = [
-                    {
-                        "pts_ms": int(seg["start_time"] * 1000),
-                        "data": segment_path.read_bytes(),
-                    }
-                ]
-                seg["audio_packets"] = []
+                seg["media_container"] = "fmp4"
+                seg["media_payload"] = segment_path.read_bytes()
 
     def _remux_segment(self, start_time: float, end_time: float, output_path: Path) -> None:
+        """Extract a segment as a self-contained fragmented MP4 asset."""
         duration = max(0.001, end_time - start_time)
         subprocess.run(
             [
@@ -912,7 +899,9 @@ class MovieAnalyzer:
                 "-map", "0:a?",
                 "-c", "copy",
                 "-avoid_negative_ts", "make_zero",
-                "-f", "mpegts",
+                "-reset_timestamps", "1",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-f", "mp4",
                 str(output_path),
             ],
             check=True,

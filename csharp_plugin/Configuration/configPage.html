@@ -51,7 +51,7 @@
                                 Filler Video Directory
                             </label>
                             <input is="emby-input" id="fillerDirectory" type="text" value="smart_branching/filler" />
-                            <div class="fieldDescription">Directory containing filler .ts files for swapping mature content</div>
+                            <div class="fieldDescription">Directory containing fMP4/CMAF filler assets for swapping mature content</div>
                         </div>
 
                         <div class="inputContainer">
@@ -118,9 +118,9 @@
                 if (!birthday) return '—';
                 var dob = new Date(birthday);
                 var today = new Date();
-                var age = today.getFullYear() - dob.getFullYear();
-                var m = today.getMonth() - dob.getMonth();
-                if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+                var age = today.getUTCFullYear() - dob.getUTCFullYear();
+                var m = today.getUTCMonth() - dob.getUTCMonth();
+                if (m < 0 || (m === 0 && today.getUTCDate() < dob.getUTCDate())) age--;
                 if (age < 13) return 'child';
                 if (age < 18) return sex === 'female' ? 'teen_f' : 'teen_m';
                 return 'adult';

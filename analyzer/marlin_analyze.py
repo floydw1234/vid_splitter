@@ -85,28 +85,42 @@ TAG_KEYWORDS = {
 # Default profiles baked into every manifest
 DEFAULT_PROFILES = {
     "child": {
-        "label": "Child (under 13)",
+        "name": "Child (under 13)",
         "age": 10,
         "gender": "any",
-        "filters": ["nudity", "violence", "language", "fear", "gore"],
+        "filters": {
+            "nudity": "swap",
+            "violence": "blur",
+            "language": "mute",
+            "gore": "skip",
+            "fear": "skip",
+        },
     },
     "teen_m": {
-        "label": "Teen male (13-17)",
+        "name": "Teen male (13-17)",
         "age": 15,
         "gender": "male",
-        "filters": ["nudity", "gore"],
+        "filters": {
+            "nudity": "swap",
+            "gore": "skip",
+            "language": "mute",
+        },
     },
     "teen_f": {
-        "label": "Teen female (13-17)",
+        "name": "Teen female (13-17)",
         "age": 15,
         "gender": "female",
-        "filters": ["nudity", "violence"],
+        "filters": {
+            "nudity": "swap",
+            "violence": "blur",
+            "language": "mute",
+        },
     },
     "adult": {
-        "label": "Adult (18+)",
+        "name": "Adult (18+)",
         "age": 18,
         "gender": "any",
-        "filters": [],
+        "filters": {},
     },
 }
 
@@ -191,8 +205,8 @@ class MarlinAnalyzer:
             )
         logger.info("=" * 60)
 
-        # 4. Attach media packets
-        self._attach_media_packets(segments)
+        # 4. Attach fMP4/CMAF media assets
+        self._attach_media_assets(segments)
 
         # 5. Build and save manifest
         manifest = self._build_manifest(segments, duration)
@@ -347,23 +361,20 @@ class MarlinAnalyzer:
             "segments": segments,
         }
 
-    def _attach_media_packets(self, segments: list[dict]) -> None:
-        """Embed MPEG-TS media payloads for every segment."""
+    def _attach_media_assets(self, segments: list[dict]) -> None:
+        """Embed self-contained fMP4/CMAF media assets for every segment."""
         import tempfile as tf
 
         with tf.TemporaryDirectory(prefix="bvf_marlin_segments_") as tmp:
             tmp_dir = Path(tmp)
             for seg in segments:
-                segment_path = tmp_dir / f"{seg['id']}.ts"
+                segment_path = tmp_dir / f"{seg['id']}.mp4"
                 self._remux_segment(seg["start_time"], seg["end_time"], segment_path)
-                seg["video_packets"] = [{
-                    "pts_ms": int(seg["start_time"] * 1000),
-                    "data": segment_path.read_bytes(),
-                }]
-                seg["audio_packets"] = []
+                seg["media_container"] = "fmp4"
+                seg["media_payload"] = segment_path.read_bytes()
 
     def _remux_segment(self, start_time: float, end_time: float, output_path: Path) -> None:
-        """Extract a segment from the video as MPEG-TS."""
+        """Extract a segment from the video as a fragmented MP4 asset."""
         duration = max(0.001, end_time - start_time)
         subprocess.run(
             [
@@ -375,7 +386,9 @@ class MarlinAnalyzer:
                 "-map", "0:a?",
                 "-c", "copy",
                 "-avoid_negative_ts", "make_zero",
-                "-f", "mpegts",
+                "-reset_timestamps", "1",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-f", "mp4",
                 str(output_path),
             ],
             check=True,

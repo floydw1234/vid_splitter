@@ -150,16 +150,16 @@ def _make_segments(duration: float, include_mature: bool = False) -> list[dict]:
 def _make_profiles() -> dict:
     return {
         "child": {
-            "label": "Child (under 13)",
-            "filters": ["nudity", "violence", "language", "fear", "gore"],
+            "name": "Child (under 13)",
+            "filters": {"nudity": "swap", "violence": "blur", "language": "mute", "fear": "skip", "gore": "skip"},
         },
         "teen": {
-            "label": "Teen (13-17)",
-            "filters": ["nudity", "gore"],
+            "name": "Teen (13-17)",
+            "filters": {"nudity": "swap", "language": "mute", "gore": "skip"},
         },
         "adult": {
-            "label": "Adult (18+)",
-            "filters": [],
+            "name": "Adult (18+)",
+            "filters": {},
         },
     }
 
@@ -268,10 +268,11 @@ class TestFullPipeline:
         assert len(manifest_safe) > 0
         assert len(manifest_mature) > 0
 
-        # Mature segments should have swap action
+        # Mature segments follow explicit per-profile filter actions.
         for seg in manifest_mature:
-            for profile_data in seg["profiles"].values():
-                assert profile_data["action"] == "swap"
+            assert seg["profiles"]["child"]["action"] == "swap"
+            assert seg["profiles"]["teen"]["action"] == "swap"
+            assert seg["profiles"]["adult"]["action"] == "play"
 
     def test_manifest_segment_count_matches_index(self, test_video, tmp_dir, profiles):
         """Verify manifest segment count == index entry count == manifest['segments'] length."""
@@ -400,16 +401,18 @@ class TestFullPipeline:
         for pname in ["child", "teen", "adult"]:
             assert seg001["profiles"][pname]["action"] == "play"
 
-        # seg_002 (mature, swap) — all profiles should have "swap"
+        # seg_002 (nudity) follows per-profile filter actions.
         seg002 = manifest_segs[1]
-        for pname in ["child", "teen", "adult"]:
+        for pname in ["child", "teen"]:
             assert seg002["profiles"][pname]["action"] == "swap"
             assert seg002["profiles"][pname]["segment_id"] == "filler_001"
+        assert seg002["profiles"]["adult"]["action"] == "play"
 
-        # seg_003 (mature, mute) — all profiles should have "mute"
+        # seg_003 (language) is muted for child/teen and played for adult.
         seg003 = manifest_segs[2]
-        for pname in ["child", "teen", "adult"]:
+        for pname in ["child", "teen"]:
             assert seg003["profiles"][pname]["action"] == "mute"
+        assert seg003["profiles"]["adult"]["action"] == "play"
 
     def test_manifest_compression(self, test_video, tmp_dir, profiles):
         """Verify the manifest in the BVF is zstandard-compressed."""
@@ -679,13 +682,16 @@ class TestIntegrationEdgeCases:
         result = BvfMuxer.read_bvf(bvf_path)
         manifest_segs = {s["id"]: s for s in result["manifest"]["segments"]}
 
-        # Check each action is preserved in all profiles
         expected_actions = {
-            "s1": "play", "s2": "swap", "s3": "skip", "s4": "mute", "s5": "blur",
+            "s1": {"child": "play", "teen": "play", "adult": "play"},
+            "s2": {"child": "swap", "teen": "swap", "adult": "play"},
+            "s3": {"child": "blur", "teen": "play", "adult": "play"},
+            "s4": {"child": "mute", "teen": "mute", "adult": "play"},
+            "s5": {"child": "skip", "teen": "play", "adult": "play"},
         }
-        for seg_id, expected_action in expected_actions.items():
+        for seg_id, expected_by_profile in expected_actions.items():
             seg = manifest_segs[seg_id]
-            for pname in profiles:
+            for pname, expected_action in expected_by_profile.items():
                 assert seg["profiles"][pname]["action"] == expected_action, (
-                    f"Segment {seg_id}: expected {expected_action}, got {seg['profiles'][pname]['action']}"
+                    f"Segment {seg_id}/{pname}: expected {expected_action}, got {seg['profiles'][pname]['action']}"
                 )

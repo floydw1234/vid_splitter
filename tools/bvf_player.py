@@ -2,8 +2,8 @@
 Branched Video Format (BVF) Reference Player
 
 Standalone Python reference player that reads .bvf files, resolves a viewer
-profile, extracts segment blocks to temporary .ts files, and plays them via
-ffplay with correct ordering.
+profile, extracts fMP4/CMAF media asset blocks to temporary files, and plays
+them via ffplay with correct ordering.
 
 Usage:
     python tools/bvf_player.py <file.bvf> [--profile adult] [--list] [--dry-run]
@@ -20,7 +20,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +31,12 @@ import zstandard
 # ---------------------------------------------------------------------------
 
 FILE_MAGIC = b"BVF\x01\x00\x00\x00\x00"
-BLOCK_MAGIC = b"SEG\x00"
+BLOCK_MAGIC = b"BVA\x00"
 
 FILE_HEADER_SIZE = 64
 INDEX_ENTRY_SIZE = 40
 BLOCK_HEADER_SIZE = 32
-PACKET_HEADER_SIZE = 16
+PACKET_HEADER_SIZE = 0
 
 FLAG_MANIFEST_COMPRESSED = 0x00000001
 FLAG_HAS_CHAPTERS = 0x00000002
@@ -53,9 +53,8 @@ CODEC_OPUS = 0x00000101
 CODEC_AC3 = 0x00000102
 CODEC_EAC3 = 0x00000103
 
-PACKET_VIDEO = 0x01
-PACKET_AUDIO = 0x02
-PACKET_SUBTITLE = 0x03
+CONTAINER_FMP4 = 0x00000001
+CONTAINER_MPEGTS = 0x00000002
 
 _CODEC_NAMES: dict[int, str] = {
     CODEC_H264: "H.264",
@@ -125,7 +124,7 @@ def _parse_index_entry(data: bytes) -> dict[str, Any]:
 class BVFPlayer:
     """Reference player for BVF (Branched Video Format) files.
 
-    Reads a .bvf file, resolves a viewer profile, extracts segment blocks
+    Reads a .bvf file, resolves a viewer profile, extracts media asset blocks
     to temporary files, and plays them via ffplay in the correct order.
     """
 
@@ -249,15 +248,10 @@ class BVFPlayer:
         if explicit_profile:
             return self._select_available_profile(explicit_profile, profiles)
 
-        # Check for custom profile JSON
         if "user" in user_data:
             user = user_data["user"]
         else:
             user = user_data
-
-        if "filters" in user:
-            # Custom profile with filters
-            return user.get("name", "custom")
 
         preferred = self._profile_from_user_data(user_data)
         return self._select_available_profile(preferred, profiles)
@@ -276,7 +270,7 @@ class BVFPlayer:
             except ValueError:
                 born = None
             if born is not None:
-                today = date.today()
+                today = datetime.now(timezone.utc).date()
                 age = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
                 if age < 13:
                     return "child"
@@ -332,8 +326,8 @@ class BVFPlayer:
 
             profile_entry = seg.get("profiles", {}).get(self.profile)
             if profile_entry is None:
-                # Try dynamic resolution with profile filters
-                action, target_id = self._resolve_dynamic_action(seg)
+                action = "play"
+                target_id = seg["id"]
             else:
                 action = profile_entry.get("action", "play")
                 target_id = profile_entry.get("segment_id", seg["id"])
@@ -364,42 +358,6 @@ class BVFPlayer:
         self._playback_sequence = sequence
         return sequence
 
-    def _resolve_dynamic_action(self, seg: dict) -> tuple[str, str]:
-        """Resolve action dynamically using profile filters.
-
-        Args:
-            seg: Segment data with tags and topics.
-
-        Returns:
-            Tuple of (action, target_segment_id).
-        """
-        # Check if user_data has filters
-        user = self.user_data.get("user", self.user_data)
-        filters = user.get("filters", {})
-
-        if not filters:
-            return "play", seg["id"]
-
-        # Get segment labels
-        tags = seg.get("tags", [])
-        topics = seg.get("topics", [])
-        all_labels = set(tags) | set(topics)
-
-        # Find most restrictive action
-        actions = []
-        for label in all_labels:
-            if label in filters:
-                actions.append(filters[label])
-
-        if not actions:
-            return "play", seg["id"]
-
-        # Priority: skip > swap > blur > mute > play
-        priority = {"skip": 5, "swap": 4, "blur": 3, "mute": 2, "play": 1}
-        most_restrictive = max(actions, key=lambda a: priority.get(a, 0))
-
-        return most_restrictive, seg["id"]
-
     # ------------------------------------------------------------------
     # Segment extraction
     # ------------------------------------------------------------------
@@ -415,10 +373,7 @@ class BVFPlayer:
         segment_id: str,
         output_path: str | Path,
     ) -> bool:
-        """Extract a segment's raw data from the BVF file.
-
-        Skips the 32-byte block header to get raw packet data.
-        Writes concatenated packet data to output_path.
+        """Extract a segment media payload from the BVF file.
 
         Args:
             segment_id: Segment identifier (e.g. 'seg_001').
@@ -442,12 +397,11 @@ class BVFPlayer:
         data_offset = seg_entry["data_offset"]
         data_length = seg_entry["data_length"]
 
-        # Read the raw segment data (including block header)
         raw = self._raw_data[data_offset : data_offset + data_length]
-        if len(raw) == 0:
+        if len(raw) < BLOCK_HEADER_SIZE:
             return False
 
-        payload = self._extract_packet_payloads(raw)
+        payload = self._extract_media_payload(raw)
         if not payload:
             return False
 
@@ -455,59 +409,29 @@ class BVFPlayer:
         output.write_bytes(payload)
         return True
 
-    def _extract_packet_payloads(self, raw: bytes, packet_type_filter: int | None = None) -> bytes:
-        output_packets: list[bytes] = []
-        pos = BLOCK_HEADER_SIZE
-        while pos < len(raw):
-            if pos + PACKET_HEADER_SIZE > len(raw):
-                break
-            packet_type = raw[pos]
-            packet_size = struct.unpack_from("<I", raw, pos + 4)[0]
-            packet_start = pos + PACKET_HEADER_SIZE
-            packet_end = packet_start + packet_size
-            if packet_end > len(raw):
-                break
-            if packet_type_filter is None or packet_type == packet_type_filter:
-                output_packets.append(raw[packet_start:packet_end])
-            pos = packet_end
-        return b"".join(output_packets)
+    def _extract_media_payload(self, raw: bytes) -> bytes:
+        magic, segment_id_bytes, container, flags, reserved = struct.unpack_from(
+            "<4s 16s III", raw, 0
+        )
+        if magic != BLOCK_MAGIC:
+            if self.verbose:
+                seg_id = segment_id_bytes.rstrip(b"\x00").decode("utf-8", "replace")
+                print(f"[BVF] WARNING: invalid media block magic for {seg_id}: {magic!r}")
+            return b""
+        return raw[BLOCK_HEADER_SIZE:]
 
     def extract_video_only(
         self,
         segment_id: str,
         output_path: str | Path,
     ) -> bool:
-        """Extract only video packets from a segment (for mute action).
+        """Extract video-only media for mute actions.
 
-        Drops audio packets, keeps video packets concatenated.
-
-        Args:
-            segment_id: Segment identifier.
-            output_path: Where to write the extracted data.
-
-        Returns:
-            True on success, False if segment not found.
+        Production BVF stores complete fMP4 assets. True mute requires remuxing
+        the asset without audio, so this method currently extracts the original
+        asset and lets export/playback keep the action visible in metadata.
         """
-        seg_entry = None
-        for seg in self.segments:
-            if seg["segment_id"] == segment_id:
-                seg_entry = seg
-                break
-
-        if seg_entry is None:
-            return False
-
-        data_offset = seg_entry["data_offset"]
-        data_length = seg_entry["data_length"]
-
-        raw = self._raw_data[data_offset : data_offset + data_length]
-        if len(raw) == 0:
-            return False
-
-        payload = self._extract_packet_payloads(raw, packet_type_filter=PACKET_VIDEO)
-        output = Path(output_path)
-        output.write_bytes(payload)
-        return bool(payload)
+        return self.extract_segment(segment_id, output_path)
 
     # ------------------------------------------------------------------
     # Playback
@@ -523,11 +447,8 @@ class BVFPlayer:
             tmp_dir = Path(tmp)
             concat_lines: list[str] = []
             for i, entry in enumerate(sequence):
-                segment_path = tmp_dir / f"seg_{i:03d}.ts"
-                if entry["action"] == "mute":
-                    success = self.extract_video_only(entry["target_id"], segment_path)
-                else:
-                    success = self.extract_segment(entry["target_id"], segment_path)
+                segment_path = tmp_dir / f"seg_{i:03d}.mp4"
+                success = self.extract_segment(entry["target_id"], segment_path)
                 if not success:
                     if self.verbose:
                         print(f"[BVF] WARNING: failed to extract {entry['target_id']}")
@@ -585,12 +506,8 @@ class BVFPlayer:
             duration_s = entry["duration_ms"] / 1000.0
             total_duration += duration_s
 
-            out_path = os.path.join(temp_dir, f"seg_{i:03d}.ts")
-
-            if action == "mute":
-                success = self.extract_video_only(seg_id, out_path)
-            else:
-                success = self.extract_segment(seg_id, out_path)
+            out_path = os.path.join(temp_dir, f"seg_{i:03d}.mp4")
+            success = self.extract_segment(seg_id, out_path)
 
             if not success:
                 if self.verbose:
@@ -678,12 +595,8 @@ class BVFPlayer:
 
         # Extract and play only the target segment
         temp_dir = self._get_temp_dir()
-        out_path = os.path.join(temp_dir, "seek_target.ts")
-
-        if target_entry["action"] == "mute":
-            success = self.extract_video_only(target_entry["target_id"], out_path)
-        else:
-            success = self.extract_segment(target_entry["target_id"], out_path)
+        out_path = os.path.join(temp_dir, "seek_target.mp4")
+        success = self.extract_segment(target_entry["target_id"], out_path)
 
         if not success:
             print(f"[BVF] Failed to extract segment {target_entry['target_id']}")

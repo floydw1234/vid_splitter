@@ -28,7 +28,7 @@ def test_analyzer_manifest():
         return
 
     sys.path.insert(0, str(Path(__file__).parent / "analyzer"))
-    from analyze import MovieAnalyzer, DEFAULT_PROFILES, TAG_TO_FILTER
+    from analyze import MovieAnalyzer
 
     mock_video = Path("/tmp/test_movie.mp4")
 
