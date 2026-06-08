@@ -614,6 +614,9 @@ class MovieAnalyzer:
 
         Adds 'topics' key to each segment with LLM-classified topics.
         """
+        for seg in segments:
+            seg.setdefault("topics", [])
+
         try:
             from analyzer.topic_classifier import LLMTopicClassifier
             clf = LLMTopicClassifier()
