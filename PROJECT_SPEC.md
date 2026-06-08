@@ -205,7 +205,7 @@ The plugin now uses **explicit user profiles** (birthday + sex) instead of Jelly
 ```bash
 cd csharp_plugin
 dotnet build -c Release
-# Copy SmartBranching.Plugin.dll, SmartBranching.Plugin.deps.json,
+# Copy Jellyfin.Plugin.SmartBranching.dll, Jellyfin.Plugin.SmartBranching.deps.json,
 # and ZstdSharp.dll to the Jellyfin plugin directory.
 ```
 

@@ -12,8 +12,8 @@ description: >
 category: "General"
 owner: "vid_splitter"
 artifacts:
-- "SmartBranching.Plugin.dll"
-- "SmartBranching.Plugin.deps.json"
+- "Jellyfin.Plugin.SmartBranching.dll"
+- "Jellyfin.Plugin.SmartBranching.deps.json"
 - "ZstdSharp.dll"
 changelog: >
   0.1.0

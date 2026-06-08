@@ -49,16 +49,16 @@ dotnet build -c Release
 ```
 
 Output:
-- `bin/Release/net8.0/SmartBranching.Plugin.dll`
-- `bin/Release/net8.0/SmartBranching.Plugin.deps.json`
+- `bin/Release/net8.0/Jellyfin.Plugin.SmartBranching.dll`
+- `bin/Release/net8.0/Jellyfin.Plugin.SmartBranching.deps.json`
 - `bin/Release/net8.0/ZstdSharp.dll`
 
 ### 3. Install in Jellyfin
 
 ```bash
 sudo mkdir -p /usr/share/jellyfin/data/plugins/SmartBranching
-sudo cp bin/Release/net8.0/SmartBranching.Plugin.dll /usr/share/jellyfin/data/plugins/SmartBranching/
-sudo cp bin/Release/net8.0/SmartBranching.Plugin.deps.json /usr/share/jellyfin/data/plugins/SmartBranching/
+sudo cp bin/Release/net8.0/Jellyfin.Plugin.SmartBranching.dll /usr/share/jellyfin/data/plugins/SmartBranching/
+sudo cp bin/Release/net8.0/Jellyfin.Plugin.SmartBranching.deps.json /usr/share/jellyfin/data/plugins/SmartBranching/
 sudo cp bin/Release/net8.0/ZstdSharp.dll /usr/share/jellyfin/data/plugins/SmartBranching/
 sudo systemctl restart jellyfin
 ```
