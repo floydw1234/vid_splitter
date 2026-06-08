@@ -29,6 +29,12 @@ public class SegmentServer : IMediaSourceProvider
 {
     private const string TokenPrefix = "smart-branch";
     private const int AssetBlockHeaderSize = 32;
+    private static readonly HashSet<string> RuntimeSupportedActions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "play",
+        "swap",
+        "skip",
+    };
 
     private readonly ILogger<SegmentServer> _logger;
     private readonly ProfileResolver _profileResolver;
@@ -245,6 +251,11 @@ public class SegmentServer : IMediaSourceProvider
                     : profileAction.SegmentId;
             }
 
+            if (!RuntimeSupportedActions.Contains(action))
+                throw new InvalidOperationException(
+                    $"Unsupported BVF action for runtime playback: '{action}'. " +
+                    "Supported actions: play, skip, swap.");
+
             if (string.Equals(action, "skip", StringComparison.OrdinalIgnoreCase))
                 continue;
 
@@ -273,13 +284,12 @@ public class SegmentServer : IMediaSourceProvider
         }
 
         _logger.LogInformation(
-            "Resolved {Total} segments for {Movie} (profile: {Profile}, swapped: {Swapped}, skipped: {Skipped}, muted: {Muted})",
+            "Resolved {Total} segments for {Movie} (profile: {Profile}, swapped: {Swapped}, skipped: {Skipped})",
             resolved.Count,
             manifest.MovieId,
             profileKey,
             resolved.Count(s => s.IsSwapped),
-            manifest.Segments.Count(s => !s.IsFiller) - resolved.Count,
-            resolved.Count(s => string.Equals(s.Action, "mute", StringComparison.OrdinalIgnoreCase)));
+            manifest.Segments.Count(s => !s.IsFiller) - resolved.Count);
 
         return resolved;
     }

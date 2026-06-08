@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from tools.bvf_player import BVFPlayer
 from vid_splitter.bvf_muxer import ASSET_BLOCK_HEADER_SIZE, BvfMuxer
 
@@ -71,3 +73,40 @@ def test_index_lengths_include_asset_header(tmp_path: Path):
     assert parsed["segments"][0]["data_length"] == (
         ASSET_BLOCK_HEADER_SIZE + len(b"ftyp....moov....moof....mdat-safe")
     )
+
+
+@pytest.mark.parametrize("unsupported_action", ["mute", "blur"])
+def test_resolve_playback_sequence_rejects_unsupported_actions(
+    tmp_path: Path,
+    unsupported_action: str,
+):
+    profiles = {
+        "child": {"name": "Child", "filters": {"language": unsupported_action}},
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "tags": ["language"],
+            "risk": "mature",
+            "action": unsupported_action,
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-mature",
+        },
+    ]
+    bvf = BvfMuxer(movie_id="fixture", title="Fixture").write_bvf(
+        tmp_path / "fixture.bvf",
+        segments=segments,
+        duration_seconds=2.0,
+        profiles=profiles,
+    )
+
+    player = BVFPlayer(bvf, profile="child")
+
+    with pytest.raises(
+        ValueError,
+        match=rf"Unsupported BVF action for runtime playback: '{unsupported_action}'",
+    ):
+        player.resolve_playback_sequence()

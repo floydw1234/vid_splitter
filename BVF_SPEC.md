@@ -116,8 +116,14 @@ Actions:
 | `play` | play the referenced segment asset |
 | `swap` | play another segment asset, usually filler |
 | `skip` | omit this narrative segment |
-| `mute` | play the asset with audio removed or silenced; implementations may require remux/transcode |
-| `blur` | play with video filtering; requires transcode/filter support |
+| `mute` | reserved metadata for future runtime support; BVF v1 playback implementations must reject it explicitly |
+| `blur` | reserved metadata for future runtime support; BVF v1 playback implementations must reject it explicitly |
+
+BVF v1 runtime playback support is intentionally narrower than the manifest
+action vocabulary. Reference/runtime players currently support only `play`,
+`swap`, and `skip`. If a manifest resolves to `mute` or `blur`, the runtime
+must fail explicitly instead of silently treating that segment as normal
+playback.
 
 ## 5. Media Asset Block
 

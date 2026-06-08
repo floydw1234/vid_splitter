@@ -29,7 +29,8 @@
 │    2. Exposes one "Smart Branch" media source per BVF profile    │
 │    3. On Play: opens the selected profile source                 │
 │    4. Serves resolved segments through Jellyfin's streaming pipe │
-│    5. Mature segments → swap, skip, mute, or blur as configured  │
+│    5. Mature segments → swap or skip as configured at runtime;   │
+│       mute/blur remain reserved manifest actions for future use   │
 │                                                                  │
 │  No external services. No Python server. Pure Jellyfin.          │
 └──────────────────────────────────────────────────────────────────┘
@@ -91,7 +92,8 @@ See [BVF_SPEC.md](BVF_SPEC.md) for the full specification.
 }
 ```
 
-**Segment actions:** `play`, `swap`, `skip`, `mute`, `blur` (future)
+**Segment actions:** `play`, `swap`, `skip`
+Reserved manifest values: `mute`, `blur` (serialized for future use but rejected by current runtimes)
 
 ## 4. Component 1: The Analyzer (Python CLI)
 **File:** `analyzer/analyze.py`
@@ -171,7 +173,7 @@ The implementation should treat Marlin-2B output as content-understanding eviden
 3. If found, exposes one "Smart Branch" MediaSource per manifest profile
 4. On playback start, `BVFReader` parses header + index and resolves the selected profile's manifest actions
 5. Segments are served through Jellyfin's native streaming (no external proxy)
-6. Mature segments are swapped, skipped, muted, or blurred based on profile filters
+6. Mature segments are swapped or skipped at runtime based on profile filters; reserved `mute`/`blur` actions are rejected explicitly
 
 The Jellyfin 10.9 `IMediaSourceProvider` API does not pass the requesting user
 into `OpenMediaSource`, so automatic per-user source selection is not available

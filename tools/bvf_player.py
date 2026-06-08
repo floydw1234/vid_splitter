@@ -129,6 +129,7 @@ class BVFPlayer:
     """
 
     SUPPORTED_PROFILES = ("adult", "teen", "teen_m", "teen_f", "child")
+    RUNTIME_SUPPORTED_ACTIONS = frozenset({"play", "swap", "skip"})
 
     def __init__(
         self,
@@ -291,6 +292,17 @@ class BVFPlayer:
                 return candidate
         return next(iter(profiles), preferred or "adult")
 
+    @classmethod
+    def _validate_runtime_action(cls, action: str) -> str:
+        normalized = action.lower()
+        if normalized not in cls.RUNTIME_SUPPORTED_ACTIONS:
+            supported = ", ".join(sorted(cls.RUNTIME_SUPPORTED_ACTIONS))
+            raise ValueError(
+                f"Unsupported BVF action for runtime playback: {action!r} "
+                f"(supported: {supported})"
+            )
+        return normalized
+
     def resolve_playback_sequence(self) -> list[dict[str, Any]]:
         """Walk manifest segments and resolve the playback sequence.
 
@@ -298,7 +310,7 @@ class BVFPlayer:
         [
             {
                 "segment_id": "seg_001",     # narrative segment
-                "action": "play",            # play | swap | mute
+                "action": "play",            # play | swap
                 "target_id": "seg_001",      # what to actually play
                 "duration_ms": 300000,
                 "start_ms": 0,
@@ -331,6 +343,8 @@ class BVFPlayer:
             else:
                 action = profile_entry.get("action", "play")
                 target_id = profile_entry.get("segment_id", seg["id"])
+
+            action = self._validate_runtime_action(action)
 
             if action == "skip":
                 continue
@@ -419,19 +433,6 @@ class BVFPlayer:
                 print(f"[BVF] WARNING: invalid media block magic for {seg_id}: {magic!r}")
             return b""
         return raw[BLOCK_HEADER_SIZE:]
-
-    def extract_video_only(
-        self,
-        segment_id: str,
-        output_path: str | Path,
-    ) -> bool:
-        """Extract video-only media for mute actions.
-
-        Production BVF stores complete fMP4 assets. True mute requires remuxing
-        the asset without audio, so this method currently extracts the original
-        asset and lets export/playback keep the action visible in metadata.
-        """
-        return self.extract_segment(segment_id, output_path)
 
     # ------------------------------------------------------------------
     # Playback
