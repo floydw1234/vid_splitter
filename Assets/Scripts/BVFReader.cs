@@ -347,6 +347,7 @@ public static class BVFReader
                 StartTime = (segment.StartMs ?? 0) / 1000d,
                 EndTime = (segment.EndMs ?? 0) / 1000d,
                 Tags = segment.Tags,
+                Topics = segment.Topics ?? new List<string>(),
                 Risk = segment.Risk ?? "safe",
                 IsFiller = segment.IsFiller,
                 Profiles = segment.Profiles ?? new Dictionary<string, SegmentProfileAction>(StringComparer.Ordinal),
@@ -434,6 +435,9 @@ public static class BVFReader
 
         [JsonPropertyName("tags")]
         public List<string> Tags { get; set; } = new();
+
+        [JsonPropertyName("topics")]
+        public List<string>? Topics { get; set; }
 
         [JsonPropertyName("risk")]
         public string? Risk { get; set; }

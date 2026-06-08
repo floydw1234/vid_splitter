@@ -61,6 +61,9 @@ public class Segment
     [JsonPropertyName("tags")]
     public List<string> Tags { get; set; } = new();
 
+    [JsonPropertyName("topics")]
+    public List<string> Topics { get; set; } = new();
+
     [JsonPropertyName("risk")]
     public string Risk { get; set; } = string.Empty;
 
