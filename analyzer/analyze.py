@@ -92,6 +92,9 @@ class MovieAnalyzer:
         cartoon_threshold: float = 0.8,
         frame_interval: int = 5,
         load_models: bool = True,
+        demo_filler_video: str | None = None,
+        demo_filler_start: float = 0.0,
+        demo_filler_duration: float | None = None,
     ):
         self.video_path = Path(video_path).resolve()
         self.output_dir = Path(output_dir) if output_dir else self.video_path.parent
@@ -100,6 +103,9 @@ class MovieAnalyzer:
         self.cartoon_threshold = cartoon_threshold
         self.frame_interval = frame_interval  # seconds between frame samples
         self.last_bvf_path: Path | None = None
+        self.demo_filler_video = Path(demo_filler_video).resolve() if demo_filler_video else None
+        self.demo_filler_start = max(0.0, demo_filler_start)
+        self.demo_filler_duration = demo_filler_duration
 
         if load_models:
             self._load_models()
@@ -807,6 +813,12 @@ class MovieAnalyzer:
             }
             if seg.get("profiles"):
                 manifest_seg["profiles"] = seg["profiles"]
+            if seg.get("is_filler"):
+                manifest_seg["is_filler"] = True
+            if seg.get("source_path"):
+                manifest_seg["source_path"] = seg["source_path"]
+                manifest_seg["source_start_time"] = seg.get("source_start_time", start_time)
+                manifest_seg["source_end_time"] = seg.get("source_end_time", end_time)
             manifest_segments.append(manifest_seg)
 
         # Log segment summary
@@ -841,35 +853,66 @@ class MovieAnalyzer:
 
         duration = self._get_duration()
         one_third = duration / 3.0
+        mature_start = round(one_third, 2)
+        mature_end = round(one_third * 2, 2)
         segments = [
             {
                 "id": "seg_001",
                 "start_time": 0.0,
-                "end_time": round(one_third, 2),
+                "end_time": mature_start,
                 "tags": [],
                 "risk": "safe",
                 "action": "play",
             },
             {
                 "id": "seg_002",
-                "start_time": round(one_third, 2),
-                "end_time": round(one_third * 2, 2),
+                "start_time": mature_start,
+                "end_time": mature_end,
                 "tags": ["gore"],
                 "risk": "mature",
                 "action": "skip",
             },
             {
                 "id": "seg_003",
-                "start_time": round(one_third * 2, 2),
+                "start_time": mature_end,
                 "end_time": round(duration, 2),
                 "tags": [],
                 "risk": "safe",
                 "action": "play",
             },
         ]
+        if self.demo_filler_video:
+            if not self.demo_filler_video.exists():
+                raise FileNotFoundError(f"Demo filler video not found: {self.demo_filler_video}")
+
+            mature_duration = max(0.01, mature_end - mature_start)
+            filler_duration = self._resolve_demo_filler_duration(mature_duration)
+            segments[1]["profiles"] = {
+                "child": {"action": "swap", "segment_id": "filler_001"},
+                "teen_m": {"action": "swap", "segment_id": "filler_001"},
+                "teen_f": {"action": "swap", "segment_id": "filler_001"},
+                "adult": {"action": "play", "segment_id": "seg_002"},
+            }
+            segments.append({
+                "id": "filler_001",
+                "start_time": 0.0,
+                "end_time": round(filler_duration, 2),
+                "tags": [],
+                "risk": "safe",
+                "action": "play",
+                "is_filler": True,
+                "source_path": str(self.demo_filler_video),
+                "source_start_time": round(self.demo_filler_start, 2),
+                "source_end_time": round(self.demo_filler_start + filler_duration, 2),
+            })
+
         segments = [s for s in segments if s["end_time"] > s["start_time"]]
-        for i, seg in enumerate(segments):
-            seg["id"] = f"seg_{i + 1:03d}"
+        narrative_index = 1
+        for seg in segments:
+            if seg["id"].startswith("filler_"):
+                continue
+            seg["id"] = f"seg_{narrative_index:03d}"
+            narrative_index += 1
 
         manifest = self._build_manifest(segments, duration)
         self._attach_media_assets(manifest["segments"])
@@ -878,17 +921,49 @@ class MovieAnalyzer:
         logger.info(f"BVF saved to: {output_bvf}")
         return manifest
 
+    def _resolve_demo_filler_duration(self, default_duration: float) -> float:
+        filler_duration = self.demo_filler_duration or default_duration
+        filler_total_duration = self._get_duration_for_path(self.demo_filler_video)
+        filler_available = max(0.01, filler_total_duration - self.demo_filler_start)
+        return round(min(filler_duration, filler_available), 2)
+
+    def _get_duration_for_path(self, video_path: Path | None) -> float:
+        if video_path is None:
+            raise ValueError("video_path is required")
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return float(result.stdout.strip())
+
     def _attach_media_assets(self, segments: list[dict]) -> None:
         """Embed self-contained fMP4/CMAF media assets for every segment."""
         with tempfile.TemporaryDirectory(prefix="bvf_analyzer_segments_") as tmp:
             tmp_dir = Path(tmp)
             for seg in segments:
                 segment_path = tmp_dir / f"{seg['id']}.mp4"
-                self._remux_segment(seg["start_time"], seg["end_time"], segment_path)
+                source_path = Path(seg.get("source_path", self.video_path))
+                source_start = seg.get("source_start_time", seg["start_time"])
+                source_end = seg.get("source_end_time", seg["end_time"])
+                self._remux_segment(source_path, source_start, source_end, segment_path)
                 seg["media_container"] = "fmp4"
                 seg["media_payload"] = segment_path.read_bytes()
 
-    def _remux_segment(self, start_time: float, end_time: float, output_path: Path) -> None:
+    def _remux_segment(
+        self,
+        source_path: Path,
+        start_time: float,
+        end_time: float,
+        output_path: Path,
+    ) -> None:
         """Extract a segment as a self-contained fragmented MP4 asset."""
         duration = max(0.001, end_time - start_time)
         subprocess.run(
@@ -896,7 +971,7 @@ class MovieAnalyzer:
                 "ffmpeg",
                 "-y",
                 "-ss", f"{start_time:.3f}",
-                "-i", str(self.video_path),
+                "-i", str(source_path),
                 "-t", f"{duration:.3f}",
                 "-map", "0:v:0",
                 "-map", "0:a?",
@@ -968,6 +1043,23 @@ def main():
         action="store_true",
         help="Create a deterministic safe/mature/safe BVF without loading ML models",
     )
+    parser.add_argument(
+        "--demo-filler-video",
+        default=None,
+        help="Demo-branch only: replacement clip to embed as filler media for mature segments",
+    )
+    parser.add_argument(
+        "--demo-filler-start",
+        type=float,
+        default=0.0,
+        help="Demo-branch only: start offset in the filler video (seconds)",
+    )
+    parser.add_argument(
+        "--demo-filler-duration",
+        type=float,
+        default=None,
+        help="Demo-branch only: replacement clip duration in seconds (defaults to mature segment length)",
+    )
     args = parser.parse_args()
 
     analyzer = MovieAnalyzer(
@@ -978,6 +1070,9 @@ def main():
         cartoon_threshold=args.cartoon_threshold,
         frame_interval=args.interval,
         load_models=not args.demo_branch,
+        demo_filler_video=args.demo_filler_video,
+        demo_filler_start=args.demo_filler_start,
+        demo_filler_duration=args.demo_filler_duration,
     )
 
     try:
