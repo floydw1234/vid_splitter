@@ -204,10 +204,13 @@ The plugin now uses **explicit user profiles** (birthday + sex) instead of Jelly
 ### Build & Install
 ```bash
 cd csharp_plugin
-dotnet build -c Release
+dotnet build SmartBranching.Plugin.sln -c Release
+dotnet test SmartBranching.Plugin.sln -c Release
 # Copy Jellyfin.Plugin.SmartBranching.dll, Jellyfin.Plugin.SmartBranching.deps.json,
 # and ZstdSharp.dll to the Jellyfin plugin directory.
 ```
+
+Plugin installation is currently manual; the project does not yet ship through a Jellyfin plugin catalog or installer.
 
 ## 6. Project Structure
 ```
@@ -261,6 +264,7 @@ vid_splitter/
 * [x] `Configuration/` — config page with live profile resolution
 * [x] BVF binary format support (header + index + manifest parsing)
 * [x] `SegmentServer.cs` — segment serving through Jellyfin pipeline
+* [x] `csharp_plugin.Tests/` — automated `ProfileResolver` coverage for age/sex/default override mapping
 * [ ] Build and test on Jellyfin server
 
 ### Phase 3: BVF Toolchain

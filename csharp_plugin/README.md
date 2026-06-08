@@ -45,15 +45,19 @@ Output:
 
 ```bash
 cd csharp_plugin
-dotnet build -c Release
+dotnet build SmartBranching.Plugin.sln -c Release
+dotnet test SmartBranching.Plugin.sln -c Release
 ```
 
 Output:
 - `bin/Release/net8.0/Jellyfin.Plugin.SmartBranching.dll`
 - `bin/Release/net8.0/Jellyfin.Plugin.SmartBranching.deps.json`
 - `bin/Release/net8.0/ZstdSharp.dll`
+- `../csharp_plugin.Tests/bin/Release/net8.0/SmartBranching.Plugin.Tests.dll`
 
 ### 3. Install in Jellyfin
+
+Install is manual today; there is no packaged installer or plugin catalog entry yet.
 
 ```bash
 sudo mkdir -p /usr/share/jellyfin/data/plugins/SmartBranching
@@ -105,7 +109,8 @@ python -m pytest tests/test_bvf_muxer.py
 
 ```bash
 cd csharp_plugin
-dotnet build
+dotnet build SmartBranching.Plugin.sln
+dotnet test SmartBranching.Plugin.sln
 ```
 
 ### Enable Plugin Logging
