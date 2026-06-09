@@ -1,9 +1,15 @@
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from tools.bvf_player import BVFPlayer
 from vid_splitter.bvf_muxer import ASSET_BLOCK_HEADER_SIZE, BvfMuxer
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _write_fixture(tmp_path: Path) -> Path:
@@ -64,6 +70,64 @@ def test_adult_sequence_keeps_all_segments(tmp_path: Path):
 
     sequence = player.resolve_playback_sequence()
     assert [entry["target_id"] for entry in sequence] == ["seg_001", "seg_002"]
+
+
+def test_dry_run_json_outputs_deterministic_segment_payload(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/bvf_player.py",
+            str(bvf),
+            "--profile",
+            "adult",
+            "--dry-run",
+            "--json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    payload = json.loads(result.stdout)
+
+    assert payload == {
+        "title": "Fixture",
+        "movie_id": "fixture",
+        "resolved_profile": "adult",
+        "total_segments": 2,
+        "total_duration_ms": 4000,
+        "segments": [
+            {
+                "segment_id": "seg_001",
+                "action": "play",
+                "selected_asset_id": "seg_001",
+                "duration_ms": 2000,
+                "start_ms": 0,
+                "end_ms": 2000,
+                "asset": {
+                    "asset_id": "seg_001",
+                    "container": "fmp4",
+                    "mime_type": "video/mp4",
+                },
+            },
+            {
+                "segment_id": "seg_002",
+                "action": "play",
+                "selected_asset_id": "seg_002",
+                "duration_ms": 2000,
+                "start_ms": 2000,
+                "end_ms": 4000,
+                "asset": {
+                    "asset_id": "seg_002",
+                    "container": "fmp4",
+                    "mime_type": "video/mp4",
+                },
+            },
+        ],
+    }
 
 
 def test_index_lengths_include_asset_header(tmp_path: Path):
