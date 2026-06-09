@@ -640,6 +640,43 @@ class BVFPlayer:
             ],
         }
 
+    def get_dry_run_json_payload(self) -> dict[str, Any]:
+        """Return machine-readable dry-run payload without extraction or playback."""
+        sequence = self.resolve_playback_sequence()
+        total_duration = sum(e["duration_ms"] for e in sequence)
+        manifest_segments = {
+            seg["id"]: seg for seg in self.manifest.get("segments", [])
+        }
+
+        payload_segments = []
+        for entry in sequence:
+            target_manifest = manifest_segments.get(entry["target_id"], {})
+            media = target_manifest.get("media", {})
+            payload_segments.append(
+                {
+                    "segment_id": entry["segment_id"],
+                    "action": entry["action"],
+                    "selected_asset_id": entry["target_id"],
+                    "duration_ms": entry["duration_ms"],
+                    "start_ms": entry["start_ms"],
+                    "end_ms": entry["end_ms"],
+                    "asset": {
+                        "asset_id": media.get("asset_id", entry["target_id"]),
+                        "container": media.get("container"),
+                        "mime_type": media.get("mime_type"),
+                    },
+                }
+            )
+
+        return {
+            "title": self.manifest.get("title", "unknown"),
+            "movie_id": self.manifest.get("movie_id", "unknown"),
+            "resolved_profile": self.profile,
+            "total_segments": len(sequence),
+            "total_duration_ms": total_duration,
+            "segments": payload_segments,
+        }
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
@@ -697,6 +734,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show what would play without extracting or playing",
     )
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON for --dry-run output",
+    )
+    parser.add_argument(
         "--seek",
         type=float,
         default=None,
@@ -724,6 +766,9 @@ def main() -> None:
     """CLI entry point."""
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.json and not args.dry_run:
+        parser.error("--json requires --dry-run")
 
     user_data = None
     if args.user_json:
@@ -769,6 +814,10 @@ def main() -> None:
 
     if args.dry_run:
         # Show what would play without extracting
+        if args.json:
+            print(json.dumps(player.get_dry_run_json_payload(), sort_keys=True))
+            return
+
         sequence = player.resolve_playback_sequence()
         info = player.get_playback_info()
 
