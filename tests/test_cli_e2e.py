@@ -26,6 +26,56 @@ def _create_demo_video(path: Path, duration: int, frequency: int) -> None:
     ])
 
 
+def _write_cli_fixture(tmp_path: Path) -> Path:
+    profiles = {
+        "child": {"name": "Child", "filters": {}},
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-safe",
+        },
+        {
+            "id": "seg_002",
+            "start_time": 2.0,
+            "end_time": 4.0,
+            "tags": ["gore"],
+            "risk": "mature",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-mature",
+            "profiles": {
+                "child": {"action": "swap", "segment_id": "filler_001"},
+                "adult": {"action": "play", "segment_id": "seg_002"},
+            },
+        },
+        {
+            "id": "filler_001",
+            "start_time": 4.0,
+            "end_time": 6.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-filler",
+            "is_filler": True,
+        },
+    ]
+    return BvfMuxer(movie_id="fixture", title="Fixture").write_bvf(
+        tmp_path / "fixture.bvf",
+        segments=segments,
+        duration_seconds=6.0,
+        profiles=profiles,
+    )
+
+
 @pytest.mark.skipif(
     subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0
     or subprocess.run(["which", "ffprobe"], capture_output=True).returncode != 0,
@@ -122,3 +172,53 @@ def test_demo_branch_can_swap_to_embedded_filler_media(tmp_path: Path):
     _run([sys.executable, "tools/bvf_player.py", str(bvf), "--user-json", str(adult_json), "--export", str(adult_export)])
     assert child_export.stat().st_size > 0
     assert adult_export.stat().st_size > 0
+
+
+def test_dry_run_json_cli_outputs_parseable_payload(tmp_path: Path):
+    bvf = _write_cli_fixture(tmp_path)
+
+    result = _run([
+        sys.executable,
+        "tools/bvf_player.py",
+        str(bvf),
+        "--profile",
+        "child",
+        "--dry-run",
+        "--json",
+    ])
+
+    payload = json.loads(result.stdout)
+
+    assert payload["title"] == "Fixture"
+    assert payload["movie_id"] == "fixture"
+    assert payload["resolved_profile"] == "child"
+    assert payload["total_segments"] == 2
+    assert payload["total_duration_ms"] == 4000
+    assert payload["segments"] == [
+        {
+            "action": "play",
+            "asset": {
+                "asset_id": "seg_001",
+                "container": "fmp4",
+                "mime_type": "video/mp4",
+            },
+            "duration_ms": 2000,
+            "end_ms": 2000,
+            "segment_id": "seg_001",
+            "selected_asset_id": "seg_001",
+            "start_ms": 0,
+        },
+        {
+            "action": "swap",
+            "asset": {
+                "asset_id": "filler_001",
+                "container": "fmp4",
+                "mime_type": "video/mp4",
+            },
+            "duration_ms": 2000,
+            "end_ms": 4000,
+            "segment_id": "seg_002",
+            "selected_asset_id": "filler_001",
+            "start_ms": 2000,
+        },
+    ]
