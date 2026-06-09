@@ -130,6 +130,28 @@ def test_dry_run_json_outputs_deterministic_segment_payload(tmp_path: Path):
     }
 
 
+def test_json_flag_requires_dry_run(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/bvf_player.py",
+            str(bvf),
+            "--profile",
+            "adult",
+            "--json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "--json requires --dry-run" in result.stderr
+    assert "usage:" in result.stderr
+
+
 def test_index_lengths_include_asset_header(tmp_path: Path):
     bvf = _write_fixture(tmp_path)
     parsed = BvfMuxer.read_bvf(bvf)
