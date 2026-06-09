@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 import sys
@@ -174,3 +175,56 @@ def test_cli_runs_extraction_and_prints_selection(tmp_path, monkeypatch, capsys)
     assert "start=4.000" in captured.out
     assert "end=9.000" in captured.out
     assert str(output) in captured.out
+
+
+def test_cli_runs_extraction_and_prints_json_selection(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "filler.mp4"
+    source.write_bytes(b"video")
+
+    expected = FillerSelection(start=4.0, end=9.0, length=5.0)
+
+    def fake_extract(**kwargs):
+        assert kwargs["source_path"] == source
+        assert kwargs["output_path"] == output
+        assert kwargs["duration"] == 20.0
+        assert kwargs["desired_length"] == 5.0
+        assert kwargs["seed"] == 123
+        assert kwargs["avoided_intervals"] == [(1.0, 2.0), (3.0, 4.0)]
+        output.write_bytes(b"clip")
+        return expected
+
+    monkeypatch.setattr("analyzer.filler.extract_filler_clip", fake_extract)
+
+    from analyzer import filler
+
+    exit_code = filler.main(
+        [
+            str(source),
+            "--duration",
+            "20",
+            "--seed",
+            "123",
+            "--output",
+            str(output),
+            "--avoid",
+            "1:2",
+            "--avoid",
+            "3:4",
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload == {
+        "start": 4.0,
+        "end": 9.0,
+        "length": 5.0,
+        "output": str(output),
+        "seed": 123,
+        "requested_length": 5.0,
+        "avoided_intervals": [[1.0, 2.0], [3.0, 4.0]],
+    }
