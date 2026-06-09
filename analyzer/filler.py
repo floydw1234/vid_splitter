@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import subprocess
 from dataclasses import dataclass
@@ -218,6 +219,11 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="Forbidden interval in start:end seconds format. Repeatable.",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output.",
+    )
     args = parser.parse_args(argv)
 
     duration = args.duration if args.duration is not None else probe_media_duration(args.source)
@@ -229,10 +235,25 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         avoided_intervals=args.avoid,
     )
-    print(
-        f"Selected filler clip start={selection.start:.3f}s end={selection.end:.3f}s "
-        f"length={selection.length:.3f}s output={args.output}"
-    )
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "start": selection.start,
+                    "end": selection.end,
+                    "length": selection.length,
+                    "output": args.output,
+                    "seed": args.seed,
+                    "requested_length": args.desired_length,
+                    "avoided_intervals": args.avoid,
+                }
+            )
+        )
+    else:
+        print(
+            f"Selected filler clip start={selection.start:.3f}s end={selection.end:.3f}s "
+            f"length={selection.length:.3f}s output={args.output}"
+        )
     return 0
 
 
