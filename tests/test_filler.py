@@ -217,14 +217,16 @@ def test_cli_runs_extraction_and_prints_json_selection(tmp_path, monkeypatch, ca
 
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-
-    assert exit_code == 0
-    assert payload == {
-        "start": 4.0,
+    expected_payload = {
+        "avoided_intervals": [[1.0, 2.0], [3.0, 4.0]],
         "end": 9.0,
         "length": 5.0,
         "output": str(output),
-        "seed": 123,
         "requested_length": 5.0,
-        "avoided_intervals": [[1.0, 2.0], [3.0, 4.0]],
+        "seed": 123,
+        "start": 4.0,
     }
+
+    assert exit_code == 0
+    assert payload == expected_payload
+    assert captured.out == json.dumps(expected_payload, sort_keys=True) + "\n"

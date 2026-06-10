@@ -162,7 +162,11 @@ class LLMTopicClassifier:
         if parsed is not None:
             return parsed
 
-        for match in re.finditer(r"```(?:json)?\s*(.*?)\s*```", content, flags=re.DOTALL):
+        for match in re.finditer(
+            r"```(?:json)?\s*(.*?)\s*```",
+            content,
+            flags=re.DOTALL | re.IGNORECASE,
+        ):
             parsed = self._parse_topic_list(match.group(1))
             if parsed is not None:
                 return parsed

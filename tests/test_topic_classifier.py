@@ -1,11 +1,12 @@
 import builtins
 import sys
 
-from analyzer.analyze import MovieAnalyzer
 from analyzer.topic_classifier import LLMTopicClassifier
 
 
 def test_classify_topics_defaults_to_empty_when_httpx_missing(monkeypatch, tmp_path):
+    from analyzer.analyze import MovieAnalyzer
+
     analyzer = MovieAnalyzer(str(tmp_path / "movie.mp4"), load_models=False)
     analyzer._transcript_data = {"segments": []}
     segments = [
@@ -95,6 +96,20 @@ def test_parse_topics_prefers_fenced_json_over_bracketed_explanatory_text():
     content = (
         "The model considered [politics] during reasoning.\n"
         "```json\n"
+        '["sports"]\n'
+        "```"
+    )
+
+    parsed = classifier._parse_topics(content)
+
+    assert parsed == ["sports"]
+
+
+def test_parse_topics_prefers_uppercase_json_fence_over_earlier_inline_array():
+    classifier = make_classifier()
+    content = (
+        'Candidate labels: ["politics"]\n'
+        "```JSON\n"
         '["sports"]\n'
         "```"
     )

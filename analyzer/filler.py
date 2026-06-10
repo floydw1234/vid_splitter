@@ -198,6 +198,24 @@ def _parse_avoid_interval(value: str) -> tuple[float, float]:
     return (start, end)
 
 
+def _build_selection_payload(
+    selection: FillerSelection,
+    output_path: str,
+    seed: int,
+    requested_length: float,
+    avoided_intervals: list[tuple[float, float]],
+) -> dict[str, object]:
+    return {
+        "start": selection.start,
+        "end": selection.end,
+        "length": selection.length,
+        "output": output_path,
+        "seed": seed,
+        "requested_length": requested_length,
+        "avoided_intervals": avoided_intervals,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Select and extract a deterministic filler clip.")
     parser.add_argument("source", help="Source video path")
@@ -236,19 +254,14 @@ def main(argv: list[str] | None = None) -> int:
         avoided_intervals=args.avoid,
     )
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "start": selection.start,
-                    "end": selection.end,
-                    "length": selection.length,
-                    "output": args.output,
-                    "seed": args.seed,
-                    "requested_length": args.desired_length,
-                    "avoided_intervals": args.avoid,
-                }
-            )
+        payload = _build_selection_payload(
+            selection=selection,
+            output_path=args.output,
+            seed=args.seed,
+            requested_length=args.desired_length,
+            avoided_intervals=args.avoid,
         )
+        print(json.dumps(payload, sort_keys=True))
     else:
         print(
             f"Selected filler clip start={selection.start:.3f}s end={selection.end:.3f}s "
