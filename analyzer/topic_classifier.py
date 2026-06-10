@@ -5,6 +5,7 @@ beyond NSFW: profanity, ideology, religion, politics, etc.
 """
 import json
 import logging
+import re
 from typing import List, Dict
 
 import httpx
@@ -157,18 +158,19 @@ class LLMTopicClassifier:
 
     def _parse_topics(self, content: str) -> List[str]:
         """Parse topic list from LLM response."""
-        # Try to find JSON array in response
-        start = content.find("[")
-        end = content.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            json_str = content[start:end + 1]
-            try:
-                topics = json.loads(json_str)
-                if isinstance(topics, list):
-                    # Validate topics are in our taxonomy
-                    return [t for t in topics if t in self.topics]
-            except json.JSONDecodeError:
-                pass
+        parsed = self._parse_topic_list(content)
+        if parsed is not None:
+            return parsed
+
+        for match in re.finditer(r"```(?:json)?\s*(.*?)\s*```", content, flags=re.DOTALL):
+            parsed = self._parse_topic_list(match.group(1))
+            if parsed is not None:
+                return parsed
+
+        for match in re.finditer(r"\[[^\[\]]*?\]", content, flags=re.DOTALL):
+            parsed = self._parse_topic_list(match.group(0))
+            if parsed is not None:
+                return parsed
 
         # Fallback: try to extract topic names
         topics = []
@@ -176,3 +178,15 @@ class LLMTopicClassifier:
             if topic_name in content:
                 topics.append(topic_name)
         return topics
+
+    def _parse_topic_list(self, value: str) -> List[str] | None:
+        """Return validated topics for a JSON array string, else None."""
+        try:
+            topics = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(topics, list):
+            return None
+
+        return [topic for topic in topics if topic in self.topics]
