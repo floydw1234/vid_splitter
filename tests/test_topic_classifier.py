@@ -1,10 +1,16 @@
 import builtins
 import sys
+import types
 
 from analyzer.topic_classifier import LLMTopicClassifier
 
 
 def test_classify_topics_defaults_to_empty_when_httpx_missing(monkeypatch, tmp_path):
+    numpy_stub = types.ModuleType("numpy")
+    numpy_stub.ndarray = object
+    monkeypatch.setitem(sys.modules, "numpy", numpy_stub)
+    monkeypatch.setitem(sys.modules, "zstandard", types.ModuleType("zstandard"))
+    sys.modules.pop("analyzer.analyze", None)
     from analyzer.analyze import MovieAnalyzer
 
     analyzer = MovieAnalyzer(str(tmp_path / "movie.mp4"), load_models=False)
