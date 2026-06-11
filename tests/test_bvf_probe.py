@@ -105,6 +105,25 @@ def test_probe_accepts_valid_bvf(tmp_path: Path):
     assert result.stderr == ""
 
 
+def test_probe_emits_valid_json_payload(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    result = _run_probe(bvf, "--profile", "child", "--json")
+
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert payload == {
+        "issues": [],
+        "path": str(bvf),
+        "profile": "child",
+        "profile_count": 2,
+        "segment_count": 2,
+        "valid": True,
+    }
+
+
 def test_probe_rejects_swap_without_target(tmp_path: Path):
     bvf = _write_fixture(tmp_path)
 
@@ -117,6 +136,32 @@ def test_probe_rejects_swap_without_target(tmp_path: Path):
     assert result.returncode != 0
     assert "swap" in result.stdout
     assert "target" in result.stdout
+
+
+def test_probe_emits_invalid_json_payload(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    def transform(manifest: dict) -> None:
+        manifest["segments"][0]["profiles"]["child"]["segment_id"] = ""
+
+    _rewrite_manifest(bvf, transform)
+    result = _run_probe(bvf, "--profile", "child", "--json")
+
+    payload = json.loads(result.stdout)
+
+    assert result.returncode != 0
+    assert result.stderr == ""
+    assert payload == {
+        "issues": [
+            "Segment seg_001 profile child: swap action requires a non-empty "
+            "target segment_id."
+        ],
+        "path": str(bvf),
+        "profile": "child",
+        "profile_count": 2,
+        "segment_count": 2,
+        "valid": False,
+    }
 
 
 def test_probe_rejects_swap_target_that_does_not_exist(tmp_path: Path):
