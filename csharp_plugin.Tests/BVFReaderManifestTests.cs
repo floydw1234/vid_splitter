@@ -9,6 +9,77 @@ namespace Jellyfin.Plugin.SmartBranching.Tests;
 
 public class BVFReaderManifestTests
 {
+    [Theory]
+    [InlineData("mute")]
+    [InlineData("blur")]
+    public void GetSegments_ProfileRuntimeResolver_RejectsUnsupportedActions(string unsupportedAction)
+    {
+        var manifestJson = $$"""
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 120000,
+              "profiles": {
+                "child": { "name": "Child", "filters": {} }
+              },
+              "segments": [
+                {
+                  "id": "seg-001",
+                  "start_ms": 1000,
+                  "end_ms": 5000,
+                  "tags": ["violence"],
+                  "risk": "mature",
+                  "is_filler": false,
+                  "profiles": {
+                    "child": { "action": "{{unsupportedAction}}", "segment_id": "seg-001" }
+                  }
+                }
+              ]
+            }
+            """;
+
+        using var bvfFile = CreateTempBvfWithSegment(manifestJson, "seg-001");
+
+        var ex = Assert.Throws<InvalidDataException>(() => BVFReader.GetSegments(bvfFile, "child"));
+
+        Assert.Contains($"Unsupported BVF action for runtime playback: '{unsupportedAction}'", ex.Message);
+    }
+
+    [Fact]
+    public void GetSegments_ProfileRuntimeResolver_RejectsMissingSwapTargets()
+    {
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 120000,
+              "profiles": {
+                "child": { "name": "Child", "filters": {} }
+              },
+              "segments": [
+                {
+                  "id": "seg-001",
+                  "start_ms": 1000,
+                  "end_ms": 5000,
+                  "tags": ["violence"],
+                  "risk": "mature",
+                  "is_filler": false,
+                  "profiles": {
+                    "child": { "action": "swap", "segment_id": "missing_999" }
+                  }
+                }
+              ]
+            }
+            """;
+
+        using var bvfFile = CreateTempBvfWithSegment(manifestJson, "seg-001");
+
+        var ex = Assert.Throws<InvalidDataException>(() => BVFReader.GetSegments(bvfFile, "child"));
+
+        Assert.Contains("seg-001", ex.Message);
+        Assert.Contains("missing_999", ex.Message);
+    }
+
     [Fact]
     public void LoadBvfManifest_PreservesSegmentTopics()
     {
@@ -107,6 +178,86 @@ public class BVFReaderManifestTests
         }
 
         return new TempFile(path);
+    }
+
+    private static TempFile CreateTempBvfWithSegment(string manifestJson, string segmentId)
+    {
+        var manifestBytes = Encoding.UTF8.GetBytes(manifestJson);
+        byte[] compressedManifest;
+        using (var compressor = new Compressor())
+        {
+            compressedManifest = compressor.Wrap(manifestBytes).ToArray();
+        }
+
+        var segmentPayload = Encoding.UTF8.GetBytes("ftyp....moov....moof....mdat-safe");
+        var assetBlock = CreateAssetBlock(segmentId, segmentPayload);
+        const ulong headerSize = 64;
+        const ulong indexEntrySize = 40;
+        var indexOffset = headerSize;
+        var indexLength = indexEntrySize;
+        var manifestOffset = indexOffset + indexLength;
+        var manifestLength = (ulong)compressedManifest.Length;
+        var dataOffset = manifestOffset + manifestLength;
+        var dataLength = (ulong)assetBlock.Length;
+
+        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.bvf");
+        using (var stream = File.Create(path))
+        using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: false))
+        {
+            const ulong magic = 0x0000000001465642;
+            const uint flags = 0;
+
+            writer.Write(magic);
+            writer.Write((ushort)1);
+            writer.Write((ushort)0);
+            writer.Write(flags);
+            writer.Write(indexOffset);
+            writer.Write(indexLength);
+            writer.Write(manifestOffset);
+            writer.Write(manifestLength);
+            writer.Write(1U);
+            writer.Write(120000UL);
+            writer.Write(0U);
+
+            WriteSegmentId(writer, segmentId);
+            writer.Write(dataOffset);
+            writer.Write(dataLength);
+            writer.Write(4000UL);
+
+            writer.Write(compressedManifest);
+            writer.Write(assetBlock);
+        }
+
+        return new TempFile(path);
+    }
+
+    private static byte[] CreateAssetBlock(string segmentId, byte[] payload)
+    {
+        using var memory = new MemoryStream();
+        using var writer = new BinaryWriter(memory, Encoding.UTF8, leaveOpen: true);
+
+        writer.Write(0x00415642);
+        WriteSegmentId(writer, segmentId);
+        writer.Write(0U);
+        writer.Write(0U);
+        writer.Write(0U);
+        writer.Write(payload);
+        writer.Flush();
+
+        return memory.ToArray();
+    }
+
+    private static void WriteSegmentId(BinaryWriter writer, string segmentId)
+    {
+        var bytes = Encoding.UTF8.GetBytes(segmentId);
+        if (bytes.Length > 16)
+            throw new ArgumentException("Segment ID must be 16 bytes or fewer.", nameof(segmentId));
+
+        writer.Write(bytes);
+        if (bytes.Length < 16)
+        {
+            writer.Write(new byte[16 - bytes.Length]);
+        }
     }
 
     private sealed class TempFile : IDisposable

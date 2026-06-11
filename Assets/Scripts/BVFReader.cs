@@ -36,6 +36,12 @@ public static class BVFReader
     private const int INDEX_ENTRY_SIZE = 40;
     private const int ASSET_BLOCK_MAGIC = 0x00415642; // "BVA\0" in little-endian
     private const int ASSET_BLOCK_HEADER_SIZE = 32;
+    private static readonly HashSet<string> RuntimeSupportedActions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "play",
+        "swap",
+        "skip",
+    };
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -112,22 +118,38 @@ public static class BVFReader
             if (manifestSegment.IsFiller)
                 continue;
 
+            var action = "play";
             var targetSegmentId = manifestSegment.Id;
             if (manifestSegment.Profiles != null &&
                 manifestSegment.Profiles.TryGetValue(profile, out var profileAction))
             {
-                if (string.Equals(profileAction.Action, "skip", StringComparison.OrdinalIgnoreCase))
+                action = string.IsNullOrWhiteSpace(profileAction.Action) ? "play" : profileAction.Action;
+                if (!RuntimeSupportedActions.Contains(action))
+                    throw new InvalidDataException(
+                        $"Unsupported BVF action for runtime playback: '{action}'. Supported actions: play, skip, swap.");
+
+                if (string.Equals(action, "skip", StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                if (string.Equals(profileAction.Action, "swap", StringComparison.OrdinalIgnoreCase) &&
+                if (string.Equals(action, "swap", StringComparison.OrdinalIgnoreCase) &&
                     !string.IsNullOrEmpty(profileAction.SegmentId))
                 {
                     targetSegmentId = profileAction.SegmentId;
                 }
             }
 
-            if (segmentMap.TryGetValue(targetSegmentId, out var segment))
-                resolved.Add(segment);
+            if (!segmentMap.TryGetValue(targetSegmentId, out var segment))
+            {
+                if (string.Equals(action, "swap", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        $"BVF segment '{manifestSegment.Id}' resolves to missing target '{targetSegmentId}'.");
+                }
+
+                continue;
+            }
+
+            resolved.Add(segment);
         }
 
         return resolved.ToArray();
