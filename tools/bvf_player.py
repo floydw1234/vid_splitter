@@ -736,7 +736,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit machine-readable JSON for --dry-run output",
+        help="Emit machine-readable JSON for --dry-run or --list output",
     )
     parser.add_argument(
         "--seek",
@@ -767,8 +767,8 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.json and not args.dry_run:
-        parser.error("--json requires --dry-run")
+    if args.json and not (args.dry_run or args.list):
+        parser.error("--json requires either --dry-run or --list")
 
     user_data = None
     if args.user_json:
@@ -788,6 +788,10 @@ def main() -> None:
 
     if args.list:
         # Show playback sequence
+        if args.json:
+            print(json.dumps(player.get_dry_run_json_payload(), sort_keys=True))
+            return
+
         sequence = player.resolve_playback_sequence()
         info = player.get_playback_info()
 
