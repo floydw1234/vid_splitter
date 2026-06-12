@@ -29,6 +29,12 @@ python3 tools/bvf_player.py /tmp/bvf-demo/demo.bvf --user-json examples/child_us
 python3 tools/bvf_player.py /tmp/bvf-demo/demo.bvf --user-json examples/adult_user.json --dry-run
 ```
 
+List the resolved sequence as machine-readable JSON:
+
+```bash
+python3 tools/bvf_player.py /tmp/bvf-demo/demo.bvf --user-json examples/child_user.json --list --json
+```
+
 Export the resolved streams:
 
 ```bash

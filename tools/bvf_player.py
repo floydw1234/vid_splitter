@@ -762,6 +762,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _print_json_payload(player: BVFPlayer) -> None:
+    """Emit the deterministic inspection payload as JSON."""
+    print(json.dumps(player.get_dry_run_json_payload(), sort_keys=True))
+
+
 def main() -> None:
     """CLI entry point."""
     parser = build_parser()
@@ -789,7 +794,7 @@ def main() -> None:
     if args.list:
         # Show playback sequence
         if args.json:
-            print(json.dumps(player.get_dry_run_json_payload(), sort_keys=True))
+            _print_json_payload(player)
             return
 
         sequence = player.resolve_playback_sequence()
@@ -819,7 +824,7 @@ def main() -> None:
     if args.dry_run:
         # Show what would play without extracting
         if args.json:
-            print(json.dumps(player.get_dry_run_json_payload(), sort_keys=True))
+            _print_json_payload(player)
             return
 
         sequence = player.resolve_playback_sequence()
