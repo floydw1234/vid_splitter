@@ -189,7 +189,7 @@ def test_list_json_outputs_deterministic_segment_payload(tmp_path: Path):
     assert result.stderr == ""
 
 
-def test_json_flag_requires_dry_run(tmp_path: Path):
+def test_json_flag_requires_dry_run_or_list(tmp_path: Path):
     bvf = _write_fixture(tmp_path)
 
     result = subprocess.run(
@@ -207,7 +207,7 @@ def test_json_flag_requires_dry_run(tmp_path: Path):
     )
 
     assert result.returncode == 2
-    assert "--json requires --dry-run" in result.stderr
+    assert "--json requires either --dry-run or --list" in result.stderr
     assert "usage:" in result.stderr
 
 
