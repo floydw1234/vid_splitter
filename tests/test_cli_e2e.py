@@ -222,3 +222,49 @@ def test_dry_run_json_cli_outputs_parseable_payload(tmp_path: Path):
             "start_ms": 2000,
         },
     ]
+
+
+def test_list_json_cli_reflects_resolved_swap_sequence(tmp_path: Path):
+    bvf = _write_cli_fixture(tmp_path)
+
+    result = _run([
+        sys.executable,
+        "tools/bvf_player.py",
+        str(bvf),
+        "--profile",
+        "child",
+        "--list",
+        "--json",
+    ])
+
+    payload = json.loads(result.stdout)
+
+    assert payload["resolved_profile"] == "child"
+    assert payload["segments"] == [
+        {
+            "action": "play",
+            "asset": {
+                "asset_id": "seg_001",
+                "container": "fmp4",
+                "mime_type": "video/mp4",
+            },
+            "duration_ms": 2000,
+            "end_ms": 2000,
+            "segment_id": "seg_001",
+            "selected_asset_id": "seg_001",
+            "start_ms": 0,
+        },
+        {
+            "action": "swap",
+            "asset": {
+                "asset_id": "filler_001",
+                "container": "fmp4",
+                "mime_type": "video/mp4",
+            },
+            "duration_ms": 2000,
+            "end_ms": 4000,
+            "segment_id": "seg_002",
+            "selected_asset_id": "filler_001",
+            "start_ms": 2000,
+        },
+    ]
