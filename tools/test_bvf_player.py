@@ -130,6 +130,65 @@ def test_dry_run_json_outputs_deterministic_segment_payload(tmp_path: Path):
     }
 
 
+def test_list_json_outputs_deterministic_segment_payload(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/bvf_player.py",
+            str(bvf),
+            "--profile",
+            "adult",
+            "--list",
+            "--json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(result.stdout)
+
+    assert payload == {
+        "title": "Fixture",
+        "movie_id": "fixture",
+        "resolved_profile": "adult",
+        "total_segments": 2,
+        "total_duration_ms": 4000,
+        "segments": [
+            {
+                "segment_id": "seg_001",
+                "action": "play",
+                "selected_asset_id": "seg_001",
+                "duration_ms": 2000,
+                "start_ms": 0,
+                "end_ms": 2000,
+                "asset": {
+                    "asset_id": "seg_001",
+                    "container": "fmp4",
+                    "mime_type": "video/mp4",
+                },
+            },
+            {
+                "segment_id": "seg_002",
+                "action": "play",
+                "selected_asset_id": "seg_002",
+                "duration_ms": 2000,
+                "start_ms": 2000,
+                "end_ms": 4000,
+                "asset": {
+                    "asset_id": "seg_002",
+                    "container": "fmp4",
+                    "mime_type": "video/mp4",
+                },
+            },
+        ],
+    }
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
 def test_json_flag_requires_dry_run(tmp_path: Path):
     bvf = _write_fixture(tmp_path)
 
