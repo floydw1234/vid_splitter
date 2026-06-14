@@ -12,6 +12,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Topic labels are intentionally lightweight heuristics.
 # Default topic taxonomy - extend as needed
 TOPIC_TAXONOMY = {
     "profanity": "swearing, cursing, explicit language",
