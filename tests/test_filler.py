@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import analyzer.filler as filler_module
 
 from analyzer.filler import (
     FillerSelection,
@@ -12,6 +13,14 @@ from analyzer.filler import (
     extract_filler_clip,
     pick_filler_window,
 )
+
+
+def test_filler_module_has_low_information_comment_without_docstring():
+    filler_path = Path(__file__).resolve().parents[1] / "analyzer" / "filler.py"
+    content = filler_path.read_text(encoding="utf-8")
+
+    assert filler_module.__doc__ is None
+    assert "low-information speech spans" in content
 
 
 def test_pick_filler_window_is_deterministic_for_same_seed():

@@ -1,3 +1,4 @@
+# Filler helpers identify low-information speech spans for replacement clips.
 from __future__ import annotations
 
 import argparse
