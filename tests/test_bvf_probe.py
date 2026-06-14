@@ -95,6 +95,14 @@ def _run_probe(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_probe_script_header_mentions_diagnostics_purpose():
+    probe_script = Path(__file__).resolve().parents[1] / "tools" / "bvf_probe.py"
+
+    header = "\n".join(probe_script.read_text().splitlines()[:10])
+
+    assert "reports BVF structure for diagnostics" in header
+
+
 def test_probe_accepts_valid_bvf(tmp_path: Path):
     bvf = _write_fixture(tmp_path)
 
