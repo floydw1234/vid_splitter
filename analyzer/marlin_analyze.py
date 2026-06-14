@@ -9,6 +9,7 @@ with risk tags via keyword matching.
 Usage:
   python marlin_analyze.py "path/to/video.mp4" [--output-dir /path/to/output]
 """
+# MARLIN analysis is an optional model-backed path.
 import json
 import logging
 import re
