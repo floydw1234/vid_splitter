@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate BVF files before runtime playback."""
 
+# Reports BVF structure for diagnostics.
 # Concurrency smoke ticket 06 marker for BVF probe tool.
 
 from __future__ import annotations
