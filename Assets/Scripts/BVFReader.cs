@@ -28,7 +28,7 @@ public struct BVFInfo
 }
 
 /// <summary>
-/// Parses BVF files: header, segment index, zstd manifest, and media asset blocks.
+/// Parses BVF files: header, segment index, zstd manifest, and media asset blocks. Concurrency smoke ticket 09 marker.
 /// </summary>
 public static class BVFReader
 {
