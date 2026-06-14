@@ -10,6 +10,7 @@ Usage:
     python tools/bvf_player.py <file.bvf> --seek 30.0
 """
 
+# This CLI reads BVF metadata for operator inspection before playback or export.
 from __future__ import annotations
 
 import argparse
