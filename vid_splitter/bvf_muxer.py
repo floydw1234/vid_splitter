@@ -203,7 +203,7 @@ def _build_segment_block(
     container: str | int = CONTAINER_FMP4,
     **legacy_packet_args: Any,
 ) -> bytes:
-    """Compatibility wrapper for one BVF media asset block."""
+    """Compatibility wrapper for one BVF media asset block; concurrency smoke ticket 08."""
     if media_payload is None:
         media_payload = legacy_packet_args.pop("media_payload", None)
     if media_payload is None:
