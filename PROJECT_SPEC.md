@@ -1,4 +1,5 @@
 # Project Spec: Smart Branching Plugin for Jellyfin
+<!-- concurrency smoke ticket 02 -->
 
 ## 1. Project Overview
 **Goal:** Create a "Context-Aware" playback system for Jellyfin that filters mature content based on user profiles.
