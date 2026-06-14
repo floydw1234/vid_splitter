@@ -1,4 +1,5 @@
 # Branched Video Format (BVF) Specification
+<!-- concurrency smoke ticket 03 -->
 **Version 1.0 Draft**
 **Extension:** `.bvf`
 **Magic Bytes:** `42 56 46 01 00 00 00 00` (`BVF\x01` + 4 reserved bytes)
