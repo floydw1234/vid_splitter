@@ -1,1 +1,1 @@
-# Concurrency smoke ticket 05 marker for vid_splitter package.
+# BVF (bvf) and video splitting utilities package; concurrency smoke ticket 05 marker.
