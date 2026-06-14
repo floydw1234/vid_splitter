@@ -93,6 +93,15 @@ def test_raw_packet_builder_is_not_supported():
         _build_packet(1, b"data", 0)
 
 
+def test_bvf_muxer_header_contains_semantics_clarifying_comment():
+    muxer_path = Path(__file__).resolve().parents[1] / "vid_splitter" / "bvf_muxer.py"
+    header_lines = muxer_path.read_text(encoding="utf-8").splitlines()[:40]
+    header_text = "\n".join(header_lines).lower()
+
+    assert "container metadata" in header_text
+    assert "analysis semantics" in header_text
+
+
 def test_write_and_read_bvf_asset_blocks(tmp_path: Path, segments, profiles):
     path = BvfMuxer(movie_id="movie", title="Movie").write_bvf(
         tmp_path / "movie.bvf",
