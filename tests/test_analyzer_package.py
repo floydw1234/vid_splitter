@@ -8,4 +8,5 @@ def test_analyzer_package_comment_marks_smoke_ticket_without_docstring():
     content = package_init.read_text()
 
     assert analyzer.__doc__ is None
+    assert "lightweight video analysis helpers" in content
     assert "concurrency smoke ticket 04" in content
