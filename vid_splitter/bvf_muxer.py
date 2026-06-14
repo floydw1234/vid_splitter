@@ -5,6 +5,7 @@ and byte-indexed standard media assets. Production BVF payloads are fMP4/CMAF
 fragments, not raw codec packets.
 """
 
+# BVF muxing writes container metadata without altering analysis semantics.
 from __future__ import annotations
 
 import argparse
