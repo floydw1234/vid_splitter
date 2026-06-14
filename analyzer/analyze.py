@@ -32,6 +32,7 @@ from vid_splitter.bvf_muxer import BvfMuxer
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+# This module coordinates analysis steps across the pipeline.
 # Profanity list — expand as needed
 PROFANITY_LIST = [
     "fuck", "shit", "damn", "hell", "bastard", "asshole", "bitch",
