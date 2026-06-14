@@ -3,6 +3,7 @@ Skin Detector (HSV-based)
 Simple but effective skin tone detection using HSV color space analysis.
 Works better than NSFW classifiers on older films with different lighting/aesthetics.
 """
+# heuristic and conservative: this favors missing edge cases over over-flagging.
 import logging
 from pathlib import Path
 from typing import Tuple

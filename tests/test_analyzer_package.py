@@ -19,3 +19,10 @@ def test_analyze_module_keeps_docstring_and_has_coordinator_comment():
     assert content.startswith('"""')
     assert "Smart Branching Analyzer" in content
     assert "coordinates analysis" in content
+
+
+def test_skin_detector_module_contains_heuristic_and_conservative_comment():
+    skin_detector = Path(__file__).resolve().parents[1] / "analyzer" / "skin_detector.py"
+    content = skin_detector.read_text()
+
+    assert "heuristic and conservative" in content
