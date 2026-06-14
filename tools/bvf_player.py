@@ -118,6 +118,7 @@ def _parse_index_entry(data: bytes) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------
 # BVFPlayer
+# Concurrency smoke ticket 07: comment-only marker; no runtime behavior change.
 # ---------------------------------------------------------------------------
 
 
