@@ -2,6 +2,7 @@ import json
 import struct
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import zstandard
@@ -9,7 +10,11 @@ import zstandard
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+TESTS_DIR = ROOT / "tests"
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
 
+from test_cli_e2e import _create_demo_video
 from vid_splitter.bvf_muxer import BvfMuxer
 
 
@@ -114,6 +119,120 @@ def _rewrite_header_segment_count(path: Path, segment_count: int) -> None:
     raw = bytearray(path.read_bytes())
     struct.pack_into("<I", raw, 48, segment_count)
     path.write_bytes(bytes(raw))
+
+
+def _rewrite_index_duration_ms(path: Path, entry_index: int, duration_ms: int) -> None:
+    raw = bytearray(path.read_bytes())
+    header = BvfMuxer.read_bvf(path)["header"]
+    entry_offset = header["index_offset"] + (entry_index * 40)
+    struct.pack_into("<Q", raw, entry_offset + 32, duration_ms)
+    path.write_bytes(bytes(raw))
+
+
+def _remux_mp4_payload(source: Path, output: Path) -> bytes:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof",
+            "-f",
+            "mp4",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return output.read_bytes()
+
+
+def _create_audio_only_mp4(path: Path, duration: int, frequency: int) -> None:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency={frequency}:duration={duration}",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _write_real_media_bvf(tmp_path: Path, *, container: str = "fmp4") -> Path:
+    video = tmp_path / f"probe_{uuid.uuid4().hex}.mp4"
+    payload_file = tmp_path / f"probe_{uuid.uuid4().hex}_payload.mp4"
+    _create_demo_video(video, duration=2, frequency=440)
+    payload = _remux_mp4_payload(video, payload_file)
+
+    profiles = {
+        "child": {"name": "Child", "filters": {}},
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "media_container": container,
+            "media_payload": payload,
+        }
+    ]
+    return BvfMuxer(movie_id="real_media", title="Real Media").write_bvf(
+        tmp_path / f"real_media_{uuid.uuid4().hex}.bvf",
+        segments=segments,
+        duration_seconds=2.0,
+        profiles=profiles,
+    )
+
+
+def _write_audio_only_bvf(tmp_path: Path) -> Path:
+    audio_mp4 = tmp_path / f"audio_only_{uuid.uuid4().hex}.mp4"
+    _create_audio_only_mp4(audio_mp4, duration=2, frequency=660)
+    payload = audio_mp4.read_bytes()
+
+    profiles = {
+        "child": {"name": "Child", "filters": {}},
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": payload,
+        }
+    ]
+    return BvfMuxer(movie_id="audio_only", title="Audio Only").write_bvf(
+        tmp_path / f"audio_only_{uuid.uuid4().hex}.bvf",
+        segments=segments,
+        duration_seconds=2.0,
+        profiles=profiles,
+    )
 
 
 def test_probe_script_header_mentions_diagnostics_purpose():
@@ -351,4 +470,59 @@ def test_probe_rejects_asset_block_segment_id_mismatch(tmp_path: Path):
     assert result.returncode != 0
     assert "segment_id" in result.stdout
     assert "asset block" in result.stdout
+    assert "seg_001" in result.stdout
+
+
+def test_probe_accepts_real_media_payload_and_reports_probe_metadata(tmp_path: Path):
+    bvf = _write_real_media_bvf(tmp_path)
+
+    result = _run_probe(bvf, "--profile", "child", "--json")
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert payload["valid"] is True
+    assert payload["media_summary"] == {
+        "checked_assets": 1,
+        "probeable_assets": 1,
+        "duration_mismatches": 0,
+    }
+    assert payload["media_assets"] == [
+        {
+            "asset_id": "seg_001",
+            "container": "fmp4",
+            "has_video": True,
+            "has_audio": True,
+        }
+    ]
+
+
+def test_probe_rejects_fake_media_payload_with_clear_ffprobe_error(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "ffprobe" in result.stdout
+    assert "seg_001" in result.stdout
+
+
+def test_probe_rejects_media_duration_mismatch(tmp_path: Path):
+    bvf = _write_real_media_bvf(tmp_path)
+    _rewrite_index_duration_ms(bvf, 0, 9000)
+
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "duration" in result.stdout
+    assert "seg_001" in result.stdout
+    assert "9000" in result.stdout
+
+
+def test_probe_rejects_media_without_video_stream(tmp_path: Path):
+    bvf = _write_audio_only_bvf(tmp_path)
+
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "video stream" in result.stdout
     assert "seg_001" in result.stdout
