@@ -481,3 +481,41 @@ def test_demo_branch_bvf_passes_keyframe_validation(tmp_path: Path):
         "keyframe_aligned_assets": 3,
         "misaligned_assets": 0,
     }
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0
+    or subprocess.run(["which", "ffprobe"], capture_output=True).returncode != 0,
+    reason="ffmpeg/ffprobe are required for CLI E2E smoke test",
+)
+def test_demo_branch_snaps_non_gop_aligned_boundaries_to_keyframes(tmp_path: Path):
+    video = tmp_path / "odd_duration.mp4"
+    _create_demo_video(video, duration=5, frequency=440)
+
+    analyze = _run([
+        sys.executable,
+        "analyzer/analyze.py",
+        str(video),
+        "--demo-branch",
+        "--output-dir",
+        str(tmp_path),
+    ])
+    assert "BVF:" in analyze.stdout
+
+    bvf = tmp_path / "odd_duration.bvf"
+    result = _run([
+        sys.executable,
+        "tools/bvf_probe.py",
+        str(bvf),
+        "--profile",
+        "child",
+        "--json",
+    ])
+    payload = json.loads(result.stdout)
+
+    assert payload["valid"] is True
+    assert payload["keyframe_summary"] == {
+        "checked_assets": 3,
+        "keyframe_aligned_assets": 3,
+        "misaligned_assets": 0,
+    }
