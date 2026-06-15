@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
 import subprocess
+import os
 
 import pytest
 
@@ -721,3 +722,30 @@ def test_main_does_not_delete_or_mutate_unrelated_library_contents(
     assert unrelated_path.read_text(encoding="utf-8") == before_contents
     assert unrelated_path.exists()
     subprocess_run.assert_not_called()
+
+
+def test_real_jellyfin_smoke_workflow_opt_in():
+    if os.environ.get("RUN_JELLYFIN_SMOKE") != "1":
+        pytest.skip("set RUN_JELLYFIN_SMOKE=1 to run the real Jellyfin smoke workflow")
+
+    config = jellyfin_smoke.load_smoke_config()
+    try:
+        jellyfin_smoke.require_prerequisites_or_skip(config)
+    except pytest.skip.Exception as exc:
+        pytest.skip(str(exc))
+
+    shorts_dir = config.jellyfin_shorts_dir or str(jellyfin_smoke.DEFAULT_SHORTS_DIR)
+    if not Path(shorts_dir).exists():
+        pytest.skip(
+            f"set JELLYFIN_SHORTS_DIR or ensure the default shorts directory exists: {shorts_dir}"
+        )
+
+    result = jellyfin_smoke.perform_smoke_workflow(
+        timeout_seconds=60.0,
+        poll_interval_seconds=2.0,
+    )
+
+    assert result.generated_bvf.exists()
+    assert result.discovery["sources"]
+    assert result.discovery["profiles"]
+    assert result.playback_readiness.playable_media_source_count >= 1
