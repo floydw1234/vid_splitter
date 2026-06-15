@@ -31,9 +31,11 @@ public class SegmentServerCacheTests
             return BVFReader.LoadBvfManifest(path);
         });
 
-        Assert.Same(first, second);
+        Assert.Same(first.Manifest, second.Manifest);
         Assert.Equal(1, loadCount);
-        Assert.Equal("movie-1", second.MovieId);
+        Assert.Equal(BvfManifestCache.CacheDisposition.Miss, first.Disposition);
+        Assert.Equal(BvfManifestCache.CacheDisposition.Hit, second.Disposition);
+        Assert.Equal("movie-1", second.Manifest.MovieId);
     }
 
     [Fact]
@@ -63,10 +65,12 @@ public class SegmentServerCacheTests
             return BVFReader.LoadBvfManifest(path);
         });
 
-        Assert.NotSame(first, second);
+        Assert.NotSame(first.Manifest, second.Manifest);
         Assert.Equal(2, loadCount);
-        Assert.Equal("movie-2", second.MovieId);
-        Assert.Contains("child", second.Profiles.Keys);
+        Assert.Equal(BvfManifestCache.CacheDisposition.Miss, first.Disposition);
+        Assert.Equal(BvfManifestCache.CacheDisposition.Invalidated, second.Disposition);
+        Assert.Equal("movie-2", second.Manifest.MovieId);
+        Assert.Contains("child", second.Manifest.Profiles.Keys);
     }
 
     [Fact]
@@ -91,9 +95,11 @@ public class SegmentServerCacheTests
             return BVFReader.LoadBvfManifest(path);
         });
 
-        Assert.NotSame(first, second);
+        Assert.NotSame(first.Manifest, second.Manifest);
         Assert.Equal(2, loadCount);
-        Assert.Equal("movie-1", second.MovieId);
+        Assert.Equal(BvfManifestCache.CacheDisposition.Miss, first.Disposition);
+        Assert.Equal(BvfManifestCache.CacheDisposition.Miss, second.Disposition);
+        Assert.Equal("movie-1", second.Manifest.MovieId);
     }
 
     private static TempFile CreateTempBvf(string movieId, string title, string profileName)

@@ -56,7 +56,23 @@ public class SegmentServer : IMediaSourceProvider
     {
         try
         {
-            return _bvfManifestCache.GetOrLoad(bvfPath, path => BVFReader.LoadBvfManifest(path));
+            var result = _bvfManifestCache.GetOrLoad(bvfPath, path => BVFReader.LoadBvfManifest(path));
+            switch (result.Disposition)
+            {
+                case BvfManifestCache.CacheDisposition.Hit:
+                    _logger.LogDebug("BVF cache hit for {Path}", bvfPath);
+                    break;
+                case BvfManifestCache.CacheDisposition.Miss:
+                    _logger.LogDebug("BVF cache miss for {Path}", bvfPath);
+                    break;
+                case BvfManifestCache.CacheDisposition.Invalidated:
+                    _logger.LogInformation(
+                        "BVF cache invalidated for {Path} because file metadata changed",
+                        bvfPath);
+                    break;
+            }
+
+            return result.Manifest;
         }
         catch (Exception ex)
         {

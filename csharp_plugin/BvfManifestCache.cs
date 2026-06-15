@@ -12,7 +12,7 @@ public sealed class BvfManifestCache
 {
     private readonly Dictionary<string, CacheEntry> _entries = new(StringComparer.Ordinal);
 
-    public BranchManifest GetOrLoad(string bvfPath, Func<string, BranchManifest> loader)
+    public CacheResult GetOrLoad(string bvfPath, Func<string, BranchManifest> loader)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(bvfPath);
         ArgumentNullException.ThrowIfNull(loader);
@@ -29,12 +29,15 @@ public sealed class BvfManifestCache
             cached.LastWriteTimeUtc == lastWriteTimeUtc &&
             cached.Length == length)
         {
-            return cached.Manifest;
+            return new CacheResult(cached.Manifest, CacheDisposition.Hit);
         }
 
+        var disposition = cached == null
+            ? CacheDisposition.Miss
+            : CacheDisposition.Invalidated;
         var manifest = loader(fileInfo.FullName);
         _entries[cacheKey] = new CacheEntry(lastWriteTimeUtc, length, manifest);
-        return manifest;
+        return new CacheResult(manifest, disposition);
     }
 
     public void Clear()
@@ -46,4 +49,15 @@ public sealed class BvfManifestCache
         DateTime LastWriteTimeUtc,
         long Length,
         BranchManifest Manifest);
+
+    public sealed record CacheResult(
+        BranchManifest Manifest,
+        CacheDisposition Disposition);
+
+    public enum CacheDisposition
+    {
+        Hit,
+        Miss,
+        Invalidated,
+    }
 }
