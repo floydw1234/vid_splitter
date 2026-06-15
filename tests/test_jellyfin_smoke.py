@@ -387,3 +387,50 @@ def test_jellyfin_client_wait_for_smart_branch_sources_raises_clear_timeout():
                 timeout_seconds=0.5,
                 poll_interval_seconds=0.1,
             )
+
+
+def test_parse_smart_branch_discovery_extracts_profiles_from_mixed_media_sources():
+    payload = {
+        "MediaSources": [
+            {"Id": "direct-1", "Name": "Movie", "Path": "/library/Movie.mp4"},
+            {
+                "Id": "sb-child",
+                "Name": "Smart Branch (child)",
+                "Path": "/library/Movie.bvf",
+                "OpenToken": "smart-child-token",
+            },
+            {
+                "Id": "sb-adult",
+                "Name": "Smart Branch (adult)",
+                "Path": "/library/Movie.bvf",
+                "Container": "mp4",
+            },
+        ]
+    }
+
+    result = jellyfin_smoke.parse_smart_branch_discovery(payload)
+
+    assert result["profiles"] == ["adult", "child"]
+    assert [source["Id"] for source in result["sources"]] == ["sb-child", "sb-adult"]
+
+
+def test_verify_smart_branch_discovery_raises_guidance_when_no_sources_found():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+
+    with mock.patch.object(client, "issue_refresh", return_value={}) as issue_refresh, mock.patch.object(
+        client,
+        "wait_for_smart_branch_sources",
+        return_value=[],
+    ):
+        with pytest.raises(jellyfin_smoke.JellyfinApiError, match="plugin logs"):
+            client.verify_smart_branch_discovery(item_id="movie-123", timeout_seconds=1.0, poll_interval_seconds=0.1)
+
+    issue_refresh.assert_called_once_with("movie-123")

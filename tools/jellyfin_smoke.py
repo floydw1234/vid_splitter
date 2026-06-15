@@ -89,6 +89,26 @@ def normalize_base_url(base_url: str) -> str:
     return base_url.rstrip("/")
 
 
+def parse_smart_branch_discovery(payload: dict) -> dict[str, list]:
+    smart_branch_sources = []
+    profiles: list[str] = []
+
+    for source in payload.get("MediaSources", []):
+        name = str(source.get("Name", ""))
+        if not name.startswith("Smart Branch (") or not name.endswith(")"):
+            continue
+
+        profile = name[len("Smart Branch (") : -1].strip()
+        smart_branch_sources.append(source)
+        if profile:
+            profiles.append(profile)
+
+    return {
+        "sources": smart_branch_sources,
+        "profiles": sorted(set(profiles)),
+    }
+
+
 class JellyfinClient:
     def __init__(self, config: SmokeConfig):
         self._config = config
@@ -146,12 +166,8 @@ class JellyfinClient:
 
     def get_smart_branch_sources(self, item_id: str) -> list[dict]:
         payload = self._request_json("GET", f"/Items/{item_id}/PlaybackInfo")
-        media_sources = payload.get("MediaSources", [])
-        return [
-            source
-            for source in media_sources
-            if "Smart Branch" in str(source.get("Name", ""))
-        ]
+        discovery = parse_smart_branch_discovery(payload)
+        return discovery["sources"]
 
     def wait_for_smart_branch_sources(
         self,
@@ -169,6 +185,26 @@ class JellyfinClient:
                     f"Timed out waiting for Smart Branch sources for item {item_id}"
                 )
             time.sleep(poll_interval_seconds)
+
+    def verify_smart_branch_discovery(
+        self,
+        item_id: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float,
+    ) -> dict[str, list]:
+        self.issue_refresh(item_id)
+        sources = self.wait_for_smart_branch_sources(
+            item_id=item_id,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+        discovery = parse_smart_branch_discovery({"MediaSources": sources})
+        if not discovery["sources"]:
+            raise JellyfinApiError(
+                "No Smart Branch sources discovered after refresh. Check Jellyfin plugin logs "
+                "and verify the sibling .bvf file is present next to the movie."
+            )
+        return discovery
 
     def _request_json(
         self,
