@@ -8,6 +8,7 @@ using System.Threading;
 using Jellyfin.Plugin.SmartBranching;
 using Jellyfin.Plugin.SmartBranching.Models;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Model.Serialization;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -17,6 +18,7 @@ using SmartBranchingPlugin = Jellyfin.Plugin.SmartBranching.Plugin;
 
 namespace SmartBranching.Plugin.Tests;
 
+[Collection(PluginStateCollection.Name)]
 public class SegmentServerStreamingTests
 {
     [Fact]

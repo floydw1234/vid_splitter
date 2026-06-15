@@ -13,6 +13,7 @@ using SmartBranchingPlugin = Jellyfin.Plugin.SmartBranching.Plugin;
 
 namespace SmartBranching.Plugin.Tests;
 
+[Collection(PluginStateCollection.Name)]
 public class ProfileResolverTests
 {
     [Fact]

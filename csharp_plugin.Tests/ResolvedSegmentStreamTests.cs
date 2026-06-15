@@ -110,7 +110,7 @@ public class ResolvedSegmentStreamTests
         var bytesRead = stream.Read(buffer, 0, buffer.Length);
 
         Assert.Equal(2, newPosition);
-        Assert.Equal(2, stream.Position);
+        Assert.Equal(4, stream.Position);
         Assert.Equal(2, bytesRead);
         Assert.Equal("AA", Encoding.UTF8.GetString(buffer, 0, bytesRead));
     }
