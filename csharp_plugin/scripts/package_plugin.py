@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import sys
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 
 
 def repo_root() -> Path:
@@ -50,6 +53,45 @@ def read_props_version(path: Path) -> str:
 
 def slugify_plugin_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def manifest_path(root: Path) -> Path:
+    return root / "csharp_plugin" / "manifest.json"
+
+
+def calculate_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8192), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def update_manifest(root: Path, metadata: dict[str, object], zip_path: Path, checksum: str) -> None:
+    path = manifest_path(root)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    plugin = manifest[0]
+    versions = plugin.setdefault("versions", [])
+
+    version = str(metadata["version"])
+    target_abi = str(metadata["targetAbi"])
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    source_url = f"https://example.invalid/{zip_path.name}"
+
+    latest_entry = {
+        "version": version,
+        "targetAbi": target_abi,
+        "sourceUrl": source_url,
+        "checksum": checksum,
+        "timestamp": timestamp,
+    }
+
+    if versions:
+        versions[0] = latest_entry
+    else:
+        versions.append(latest_entry)
+
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,6 +140,9 @@ def main() -> int:
         for artifact in artifacts:
             artifact_path = build_output / artifact
             archive.write(artifact_path, arcname=artifact)
+
+    checksum = calculate_sha256(zip_path)
+    update_manifest(root, metadata, zip_path, checksum)
 
     print(zip_path)
     return 0

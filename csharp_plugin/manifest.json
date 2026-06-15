@@ -10,9 +10,9 @@
       {
         "version": "0.1.0.0",
         "targetAbi": "10.9.0.0",
-        "sourceUrl": "https://example.invalid/jellyfin-plugin-smart-branching-0.1.0.0.zip",
-        "checksum": "00000000000000000000000000000000",
-        "timestamp": "2026-06-15T00:00:00Z"
+        "sourceUrl": "https://example.invalid/smart-branching-0.1.0.0.zip",
+        "checksum": "29e91437c8139bf3361a02131c346513de264bd7eb0adcce51453957044b9268",
+        "timestamp": "2026-06-15T17:54:55Z"
       }
     ]
   }
