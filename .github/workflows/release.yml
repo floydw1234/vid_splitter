@@ -1,0 +1,47 @@
+name: Release Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build
+        run: dotnet build csharp_plugin/SmartBranching.Plugin.sln -c Release
+
+      - name: Test
+        run: dotnet test csharp_plugin/SmartBranching.Plugin.sln -c Release --no-build
+
+      - name: Package
+        run: |
+          python csharp_plugin/scripts/package_plugin.py \
+            --build-output csharp_plugin/bin/Release/net8.0 \
+            --output-dir csharp_plugin/dist
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            csharp_plugin/dist/*.zip
+            csharp_plugin/manifest.json
