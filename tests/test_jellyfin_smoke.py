@@ -3,6 +3,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
+import subprocess
 
 import pytest
 
@@ -543,3 +544,180 @@ def test_jellyfin_client_check_playback_readiness_raises_when_no_playable_media_
     ):
         with pytest.raises(jellyfin_smoke.JellyfinApiError, match="No playable media sources"):
             client.check_playback_readiness(item_id="movie-123", discovery=discovery, requested_profile="child")
+
+
+def test_main_prints_skip_style_output_and_nonzero_when_environment_is_missing(capsys: pytest.CaptureFixture[str]):
+    with mock.patch.object(
+        jellyfin_smoke,
+        "run_smoke",
+        side_effect=pytest.skip.Exception("Missing Jellyfin smoke configuration: JELLYFIN_BASE_URL"),
+    ):
+        exit_code = jellyfin_smoke.main()
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "SKIPPED:" in captured.out
+    assert "JELLYFIN_BASE_URL" in captured.out
+
+
+def test_main_successful_dry_run_prints_concise_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+):
+    video_path = tmp_path / "Movie.mp4"
+    video_path.write_bytes(b"video")
+    bvf_path = tmp_path / "Movie.bvf"
+    movie_item = {"Id": "movie-123", "Path": str(video_path), "Name": "Movie"}
+    discovery = {
+        "profiles": ["adult", "child"],
+        "sources": [
+            {"Id": "sb-adult", "Name": "Smart Branch (adult)"},
+            {"Id": "sb-child", "Name": "Smart Branch (child)"},
+        ],
+    }
+    readiness = jellyfin_smoke.PlaybackReadinessResult(
+        selected_profile="adult",
+        selected_source_id="sb-adult",
+        playable_media_source_count=1,
+    )
+
+    monkeypatch.setenv("JELLYFIN_BASE_URL", "https://jellyfin.example")
+    monkeypatch.setenv("JELLYFIN_API_KEY", "secret")
+
+    with mock.patch.object(
+        jellyfin_smoke,
+        "select_video_candidate",
+        return_value=jellyfin_smoke.VideoSelectionResult(path=video_path, skip_reason=None),
+    ), mock.patch.object(
+        jellyfin_smoke,
+        "run_analyzer",
+        return_value=bvf_path,
+    ), mock.patch.object(
+        jellyfin_smoke,
+        "probe_bvf",
+        return_value=None,
+    ), mock.patch.object(
+        jellyfin_smoke.JellyfinClient,
+        "find_movie_item",
+        return_value=movie_item,
+    ), mock.patch.object(
+        jellyfin_smoke.JellyfinClient,
+        "verify_smart_branch_discovery",
+        return_value=discovery,
+    ), mock.patch.object(
+        jellyfin_smoke.JellyfinClient,
+        "check_playback_readiness",
+        return_value=readiness,
+    ):
+        exit_code = jellyfin_smoke.main(["--dry-run"])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"Selected video: {video_path}" in captured.out
+    assert f"Generated BVF: {bvf_path}" in captured.out
+    assert "Discovered profiles: adult, child" in captured.out
+    assert "Playback ready: yes (profile=adult, media_sources=1)" in captured.out
+
+
+def test_main_invokes_demo_branch_analyzer_and_probe_before_jellyfin_calls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    video_path = tmp_path / "Movie.mp4"
+    video_path.write_bytes(b"video")
+    bvf_path = tmp_path / "Movie.bvf"
+    call_order: list[str] = []
+
+    monkeypatch.setenv("JELLYFIN_BASE_URL", "https://jellyfin.example")
+    monkeypatch.setenv("JELLYFIN_API_KEY", "secret")
+
+    def fake_find_movie_item(*args, **kwargs):
+        call_order.append("find")
+        return {"Id": "movie-123", "Path": str(video_path), "Name": "Movie"}
+
+    with mock.patch.object(
+        jellyfin_smoke,
+        "select_video_candidate",
+        return_value=jellyfin_smoke.VideoSelectionResult(path=video_path, skip_reason=None),
+    ), mock.patch.object(
+        jellyfin_smoke,
+        "run_analyzer",
+        side_effect=lambda *args, **kwargs: call_order.append("analyze") or bvf_path,
+    ) as run_analyzer, mock.patch.object(
+        jellyfin_smoke,
+        "probe_bvf",
+        side_effect=lambda *args, **kwargs: call_order.append("probe"),
+    ) as probe_bvf, mock.patch.object(
+        jellyfin_smoke.JellyfinClient,
+        "find_movie_item",
+        side_effect=fake_find_movie_item,
+    ), mock.patch.object(
+        jellyfin_smoke.JellyfinClient,
+        "verify_smart_branch_discovery",
+        return_value={"profiles": ["adult"], "sources": [{"Id": "sb-adult", "Name": "Smart Branch (adult)"}]},
+    ), mock.patch.object(
+        jellyfin_smoke.JellyfinClient,
+        "check_playback_readiness",
+        return_value=jellyfin_smoke.PlaybackReadinessResult(
+            selected_profile="adult",
+            selected_source_id="sb-adult",
+            playable_media_source_count=1,
+        ),
+    ):
+        exit_code = jellyfin_smoke.main(["--dry-run"])
+
+    assert exit_code == 0
+    assert "--demo-branch" in run_analyzer.call_args.args[0]
+    assert probe_bvf.call_args.args[0] == bvf_path
+    assert call_order == ["analyze", "probe", "find"]
+
+
+def test_main_does_not_delete_or_mutate_unrelated_library_contents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    library_dir = tmp_path / "library"
+    library_dir.mkdir()
+    video_path = library_dir / "Movie.mp4"
+    video_path.write_bytes(b"video")
+    unrelated_path = library_dir / "Keep.txt"
+    unrelated_path.write_text("preserve me", encoding="utf-8")
+    before_contents = unrelated_path.read_text(encoding="utf-8")
+
+    monkeypatch.setenv("JELLYFIN_BASE_URL", "https://jellyfin.example")
+    monkeypatch.setenv("JELLYFIN_API_KEY", "secret")
+
+    with mock.patch.object(
+        jellyfin_smoke,
+        "select_video_candidate",
+        return_value=jellyfin_smoke.VideoSelectionResult(path=video_path, skip_reason=None),
+    ), mock.patch.object(
+        jellyfin_smoke,
+        "run_analyzer",
+        return_value=tmp_path / "Movie.bvf",
+    ), mock.patch.object(
+        jellyfin_smoke,
+        "probe_bvf",
+        return_value=None,
+    ), mock.patch.object(
+        jellyfin_smoke.JellyfinClient,
+        "find_movie_item",
+        return_value={"Id": "movie-123", "Path": str(video_path), "Name": "Movie"},
+    ), mock.patch.object(
+        jellyfin_smoke.JellyfinClient,
+        "verify_smart_branch_discovery",
+        return_value={"profiles": ["adult"], "sources": [{"Id": "sb-adult", "Name": "Smart Branch (adult)"}]},
+    ), mock.patch.object(
+        jellyfin_smoke.JellyfinClient,
+        "check_playback_readiness",
+        return_value=jellyfin_smoke.PlaybackReadinessResult(
+            selected_profile="adult",
+            selected_source_id="sb-adult",
+            playable_media_source_count=1,
+        ),
+    ), mock.patch.object(subprocess, "run") as subprocess_run:
+        exit_code = jellyfin_smoke.main(["--dry-run"])
+
+    assert exit_code == 0
+    assert unrelated_path.read_text(encoding="utf-8") == before_contents
+    assert unrelated_path.exists()
+    subprocess_run.assert_not_called()

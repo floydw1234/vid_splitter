@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -37,6 +39,14 @@ class PlaybackReadinessResult:
     selected_profile: str
     selected_source_id: str
     playable_media_source_count: int
+
+
+@dataclass(frozen=True)
+class SmokeWorkflowResult:
+    selected_video: Path
+    generated_bvf: Path
+    discovery: dict[str, list]
+    playback_readiness: PlaybackReadinessResult
 
 
 class JellyfinApiError(RuntimeError):
@@ -327,6 +337,22 @@ def build_analyzer_command(movie_path: Path, output_dir: Path) -> list[str]:
     ]
 
 
+def run_analyzer(command: list[str]) -> Path:
+    subprocess.run(command, check=True, capture_output=True, text=True)
+    movie_path = Path(command[2])
+    output_dir = Path(command[command.index("--output-dir") + 1])
+    return output_dir / f"{movie_path.stem}.bvf"
+
+
+def probe_bvf(bvf_path: Path) -> None:
+    subprocess.run(
+        [sys.executable, "tools/bvf_probe.py", str(bvf_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def select_video_candidate(default_shorts_dir: Path = DEFAULT_SHORTS_DIR) -> VideoSelectionResult:
     config = load_smoke_config()
     base_dir = Path(config.jellyfin_shorts_dir) if config.jellyfin_shorts_dir else default_shorts_dir
@@ -353,3 +379,85 @@ def run_smoke() -> VideoSelectionResult:
     config = load_smoke_config()
     require_prerequisites_or_skip(config)
     return select_video_candidate()
+
+
+def perform_smoke_workflow(
+    requested_profile: str | None = None,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 1.0,
+) -> SmokeWorkflowResult:
+    selection = run_smoke()
+    if selection.path is None:
+        raise pytest.skip.Exception(selection.skip_reason or "No video candidate selected")
+
+    video_path = selection.path
+    analyzer_command = build_analyzer_command(video_path, video_path.parent)
+    bvf_path = run_analyzer(analyzer_command)
+    probe_bvf(bvf_path)
+
+    client = JellyfinClient(load_smoke_config())
+    item = client.find_movie_item(video_path, search_terms=[video_path.stem])
+    if item is None:
+        raise JellyfinApiError(f"Jellyfin item not found for video: {video_path}")
+
+    discovery = client.verify_smart_branch_discovery(
+        item_id=str(item["Id"]),
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    playback_readiness = client.check_playback_readiness(
+        item_id=str(item["Id"]),
+        discovery=discovery,
+        requested_profile=requested_profile,
+    )
+    return SmokeWorkflowResult(
+        selected_video=video_path,
+        generated_bvf=bvf_path,
+        discovery=discovery,
+        playback_readiness=playback_readiness,
+    )
+
+
+def format_smoke_summary(result: SmokeWorkflowResult) -> str:
+    profiles = ", ".join(result.discovery["profiles"])
+    readiness = result.playback_readiness
+    return "\n".join(
+        [
+            f"Selected video: {result.selected_video}",
+            f"Generated BVF: {result.generated_bvf}",
+            f"Discovered profiles: {profiles}",
+            (
+                "Playback ready: yes "
+                f"(profile={readiness.selected_profile}, media_sources={readiness.playable_media_source_count})"
+            ),
+        ]
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the Jellyfin Smart Branch smoke workflow")
+    parser.add_argument("--profile", help="Optional Smart Branch profile to verify")
+    parser.add_argument("--dry-run", action="store_true", help="Run the smoke workflow without extra operator actions")
+    parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
+    args = parser.parse_args(argv or [])
+
+    try:
+        result = perform_smoke_workflow(
+            requested_profile=args.profile,
+            timeout_seconds=args.timeout_seconds,
+            poll_interval_seconds=args.poll_interval_seconds,
+        )
+    except pytest.skip.Exception as exc:
+        print(f"SKIPPED: {exc}")
+        return 2
+    except (JellyfinApiError, subprocess.CalledProcessError) as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+    print(format_smoke_summary(result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
