@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import pytest
@@ -73,7 +75,11 @@ def build_json_headers(extra_headers: dict[str, str] | None = None) -> dict[str,
 
 
 def parse_json_response(response) -> dict:
-    payload = json.loads(response.read().decode("utf-8"))
+    raw_payload = response.read()
+    if not raw_payload:
+        return {}
+
+    payload = json.loads(raw_payload.decode("utf-8"))
     if not isinstance(payload, dict):
         raise JellyfinApiError("Expected JSON object response from Jellyfin API")
     return payload
@@ -113,14 +119,66 @@ class JellyfinClient:
     def get_authenticated_headers(self) -> dict[str, str]:
         return build_api_key_headers(self.authenticate())
 
+    def find_movie_item(self, movie_path: Path, search_terms: list[str]) -> dict | None:
+        query = {"searchTerm": search_terms[0]} if search_terms else {"searchTerm": movie_path.stem}
+        payload = self._request_json("GET", "/Items", query=query)
+        items = payload.get("Items", [])
+        exact_matches = [item for item in items if item.get("Path") == str(movie_path)]
+        if exact_matches:
+            return exact_matches[0]
+
+        if len(items) == 0:
+            return None
+        if len(items) == 1:
+            return items[0]
+        raise JellyfinApiError(f"Ambiguous Jellyfin item lookup for {movie_path}")
+
+    def refresh_item(self, item_id: str) -> dict:
+        return self._request_json("POST", f"/Items/{item_id}/Refresh")
+
+    def refresh_library(self) -> dict:
+        return self._request_json("POST", "/Library/Refresh")
+
+    def issue_refresh(self, item_id: str | None) -> dict:
+        if item_id:
+            return self.refresh_item(item_id)
+        return self.refresh_library()
+
+    def get_smart_branch_sources(self, item_id: str) -> list[dict]:
+        payload = self._request_json("GET", f"/Items/{item_id}/PlaybackInfo")
+        media_sources = payload.get("MediaSources", [])
+        return [
+            source
+            for source in media_sources
+            if "Smart Branch" in str(source.get("Name", ""))
+        ]
+
+    def wait_for_smart_branch_sources(
+        self,
+        item_id: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float,
+    ) -> list[dict]:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            sources = self.get_smart_branch_sources(item_id)
+            if sources:
+                return sources
+            if time.monotonic() >= deadline:
+                raise JellyfinApiError(
+                    f"Timed out waiting for Smart Branch sources for item {item_id}"
+                )
+            time.sleep(poll_interval_seconds)
+
     def _request_json(
         self,
         method: str,
         path: str,
         body: dict | None = None,
         headers: dict[str, str] | None = None,
+        query: dict[str, str] | None = None,
     ) -> dict:
-        request = self._build_request(method, path, body=body, headers=headers)
+        request = self._build_request(method, path, body=body, headers=headers, query=query)
         try:
             with urlopen(request) as response:
                 return parse_json_response(response)
@@ -135,6 +193,7 @@ class JellyfinClient:
         path: str,
         body: dict | None = None,
         headers: dict[str, str] | None = None,
+        query: dict[str, str] | None = None,
     ) -> Request:
         request_headers = build_json_headers(headers)
         payload = None
@@ -142,8 +201,12 @@ class JellyfinClient:
             request_headers["Content-Type"] = "application/json"
             payload = json.dumps(body).encode("utf-8")
 
+        url = self._base_url + path
+        if query:
+            url += "?" + urlencode(query)
+
         return Request(
-            url=self._base_url + path,
+            url=url,
             data=payload,
             headers=request_headers,
             method=method,

@@ -222,3 +222,168 @@ def test_jellyfin_client_raises_clear_errors_for_http_failures(status_code: int,
     ):
         with pytest.raises(jellyfin_smoke.JellyfinApiError, match=str(status_code)):
             client.get_public_system_info()
+
+
+def test_jellyfin_client_find_movie_item_matches_exact_path():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+    movie_path = Path("/library/Movies/Movie.mp4")
+
+    with mock.patch.object(
+        client,
+        "_request_json",
+        return_value={
+            "Items": [
+                {"Id": "wrong", "Path": "/library/Movies/Other.mp4", "Name": "Movie"},
+                {"Id": "right", "Path": str(movie_path), "Name": "Movie"},
+            ]
+        },
+    ) as request_json:
+        item = client.find_movie_item(movie_path, search_terms=["Movie"])
+
+    assert item["Id"] == "right"
+    assert request_json.call_args.args[0:2] == ("GET", "/Items")
+    assert request_json.call_args.kwargs["query"]["searchTerm"] == "Movie"
+
+
+def test_jellyfin_client_find_movie_item_returns_none_when_no_match():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+
+    with mock.patch.object(
+        client,
+        "_request_json",
+        return_value={"Items": []},
+    ):
+        item = client.find_movie_item(Path("/library/Movies/Missing.mp4"), search_terms=["Missing"])
+
+    assert item is None
+
+
+def test_jellyfin_client_find_movie_item_raises_on_ambiguous_search_results():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+
+    with mock.patch.object(
+        client,
+        "_request_json",
+        return_value={
+            "Items": [
+                {"Id": "one", "Path": "/library/Movies/One.mp4", "Name": "Movie"},
+                {"Id": "two", "Path": "/library/Movies/Two.mp4", "Name": "Movie"},
+            ]
+        },
+    ):
+        with pytest.raises(jellyfin_smoke.JellyfinApiError, match="Ambiguous"):
+            client.find_movie_item(Path("/library/Movies/Movie.mp4"), search_terms=["Movie"])
+
+
+def test_jellyfin_client_issue_refresh_prefers_item_refresh_when_item_is_known():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+
+    with mock.patch.object(client, "_request_json", return_value={}) as request_json:
+        client.issue_refresh(item_id="movie-123")
+
+    assert request_json.call_args.args[0:2] == ("POST", "/Items/movie-123/Refresh")
+
+
+def test_jellyfin_client_issue_refresh_falls_back_to_library_refresh_without_item():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+
+    with mock.patch.object(client, "_request_json", return_value={}) as request_json:
+        client.issue_refresh(item_id=None)
+
+    assert request_json.call_args.args[0:2] == ("POST", "/Library/Refresh")
+
+
+def test_jellyfin_client_waits_until_smart_branch_sources_appear():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+    expected_sources = [{"Id": "smart-branch-child", "Name": "Smart Branch (child)"}]
+
+    with mock.patch.object(
+        client,
+        "get_smart_branch_sources",
+        side_effect=[[], [], expected_sources],
+    ) as get_sources, mock.patch.object(jellyfin_smoke.time, "sleep") as sleep_mock:
+        sources = client.wait_for_smart_branch_sources(
+            item_id="movie-123",
+            timeout_seconds=3.0,
+            poll_interval_seconds=0.1,
+        )
+
+    assert sources == expected_sources
+    assert get_sources.call_count == 3
+    assert sleep_mock.call_count == 2
+
+
+def test_jellyfin_client_wait_for_smart_branch_sources_raises_clear_timeout():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+
+    with mock.patch.object(
+        client,
+        "get_smart_branch_sources",
+        return_value=[],
+    ), mock.patch.object(
+        jellyfin_smoke.time,
+        "monotonic",
+        side_effect=[0.0, 0.2, 0.4, 0.6],
+    ), mock.patch.object(jellyfin_smoke.time, "sleep"):
+        with pytest.raises(jellyfin_smoke.JellyfinApiError, match="Timed out waiting for Smart Branch sources"):
+            client.wait_for_smart_branch_sources(
+                item_id="movie-123",
+                timeout_seconds=0.5,
+                poll_interval_seconds=0.1,
+            )
