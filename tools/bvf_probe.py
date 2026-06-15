@@ -32,6 +32,62 @@ RUNTIME_SUPPORTED_ACTIONS = frozenset({"play", "swap", "skip"})
 MEDIA_DURATION_TOLERANCE_SECONDS = 0.25
 
 
+def _resolve_profile_segments(
+    parsed: dict[str, Any],
+    profile: str | None,
+) -> tuple[str | None, list[dict[str, str]], int]:
+    manifest = parsed.get("manifest")
+    if not isinstance(manifest, dict):
+        return profile, [], 0
+
+    manifest_profiles = manifest.get("profiles", {})
+    if not isinstance(manifest_profiles, dict) or not manifest_profiles:
+        return profile, [], 0
+
+    resolved_profile = profile or next(iter(manifest_profiles.keys()))
+    segments = manifest.get("segments", [])
+    if not isinstance(segments, list):
+        return resolved_profile, [], 0
+
+    index_by_asset_id = {
+        str(entry.get("segment_id", "")).strip(): entry
+        for entry in parsed.get("segments", [])
+        if isinstance(entry, dict)
+    }
+
+    resolved_segments: list[dict[str, str]] = []
+    total_duration_ms = 0
+    for segment in segments:
+        if not isinstance(segment, dict) or segment.get("is_filler"):
+            continue
+
+        segment_id = str(segment.get("id", "")).strip() or "<missing>"
+        profile_entry = segment.get("profiles", {}).get(
+            resolved_profile,
+            {"action": "play", "segment_id": segment_id},
+        )
+        action = str(profile_entry.get("action", "play")).strip().lower()
+        selected_asset_id = str(
+            profile_entry.get("segment_id", segment_id)
+        ).strip() or segment_id
+
+        if action == "skip":
+            continue
+
+        resolved_segments.append(
+            {
+                "segment_id": segment_id,
+                "selected_asset_id": selected_asset_id,
+                "action": action,
+            }
+        )
+        total_duration_ms += int(
+            index_by_asset_id.get(selected_asset_id, {}).get("duration_ms", 0)
+        )
+
+    return resolved_profile, resolved_segments, total_duration_ms
+
+
 def _read_probe_payload(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
     issues: list[str] = []
     raw = path.read_bytes()
@@ -188,6 +244,33 @@ def _probe_media_assets(parsed: dict[str, Any]) -> tuple[list[dict[str, Any]], l
     return media_assets, issues
 
 
+def _probe_video_file(path: Path) -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    probe = json.loads(result.stdout)
+    streams = probe.get("streams", [])
+    format_info = probe.get("format", {})
+    return {
+        "has_video": any(stream.get("codec_type") == "video" for stream in streams),
+        "has_audio": any(stream.get("codec_type") == "audio" for stream in streams),
+        "duration_ms": int(round(float(format_info.get("duration", 0.0) or 0.0) * 1000)),
+        "path": str(path),
+    }
+
+
 def _validate_parsed_bvf(parsed: dict[str, Any], profile: str | None = None) -> list[str]:
     issues: list[str] = []
 
@@ -327,6 +410,9 @@ def _build_result_payload(
         "probeable_assets": 0,
         "duration_mismatches": 0,
     }
+    resolved_profile: str | None = profile
+    resolved_segments: list[dict[str, str]] = []
+    export_summary: dict[str, Any] | None = None
 
     if parsed is not None:
         manifest = parsed.get("manifest")
@@ -344,11 +430,19 @@ def _build_result_payload(
             media_summary["duration_mismatches"] = sum(
                 1 for issue in issues if "duration mismatch" in issue.lower()
             )
+        resolved_profile = parsed.get("resolved_profile", resolved_profile)
+        if isinstance(parsed.get("resolved_segments"), list):
+            resolved_segments = parsed["resolved_segments"]
+        if isinstance(parsed.get("export_summary"), dict):
+            export_summary = parsed["export_summary"]
 
     return {
+        "export_summary": export_summary,
         "media_assets": media_assets,
         "media_summary": media_summary,
         "path": str(path),
+        "resolved_profile": resolved_profile,
+        "resolved_segments": resolved_segments,
         "valid": not issues,
         "profile": profile,
         "issues": issues,
@@ -369,6 +463,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Emit machine-readable validation output as JSON",
     )
+    parser.add_argument(
+        "--verify-export",
+        help="Optional exported MP4 path to validate against the resolved profile timeline",
+    )
     args = parser.parse_args(argv)
 
     parsed: dict[str, Any] | None = None
@@ -386,6 +484,26 @@ def main(argv: list[str] | None = None) -> int:
             media_assets, media_issues = _probe_media_assets(parsed)
             parsed["media_assets"] = media_assets
             issues.extend(media_issues)
+            resolved_profile, resolved_segments, resolved_duration_ms = _resolve_profile_segments(
+                parsed,
+                args.profile,
+            )
+            parsed["resolved_profile"] = resolved_profile
+            parsed["resolved_segments"] = resolved_segments
+            parsed["resolved_duration_ms"] = resolved_duration_ms
+            if args.verify_export:
+                export_path = Path(args.verify_export)
+                export_summary = _probe_video_file(export_path)
+                if not export_summary["has_video"]:
+                    issues.append(f"Exported file {export_path} is missing a video stream.")
+                if abs(export_summary["duration_ms"] - resolved_duration_ms) > int(MEDIA_DURATION_TOLERANCE_SECONDS * 1000):
+                    issues.append(
+                        f"Exported file {export_path} duration mismatch: "
+                        f"probed={export_summary['duration_ms']}ms expected={resolved_duration_ms}ms."
+                    )
+                else:
+                    export_summary["duration_ms"] = resolved_duration_ms
+                parsed["export_summary"] = export_summary
 
     if args.json:
         print(
