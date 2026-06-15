@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,7 @@ from vid_splitter.bvf_muxer import (
 )
 
 RUNTIME_SUPPORTED_ACTIONS = frozenset({"play", "swap", "skip"})
+MEDIA_DURATION_TOLERANCE_SECONDS = 0.25
 
 
 def _read_probe_payload(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
@@ -114,6 +117,75 @@ def _read_probe_payload(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
         "segments": index_entries,
         "manifest": manifest,
     }, issues
+
+
+def _probe_media_assets(parsed: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    issues: list[str] = []
+    media_assets: list[dict[str, Any]] = []
+    raw = parsed["raw"]
+
+    with tempfile.TemporaryDirectory(prefix="bvf_probe_assets_") as tmp:
+        tmp_dir = Path(tmp)
+        for entry in parsed.get("segments", []):
+            segment_id = str(entry.get("segment_id", "")).strip() or "<missing>"
+            data_offset = int(entry["data_offset"])
+            data_length = int(entry["data_length"])
+            payload = raw[
+                data_offset + ASSET_BLOCK_HEADER_SIZE : data_offset + data_length
+            ]
+            asset_path = tmp_dir / f"{segment_id}.mp4"
+            asset_path.write_bytes(payload)
+
+            try:
+                result = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-print_format",
+                        "json",
+                        "-show_format",
+                        "-show_streams",
+                        str(asset_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or "").strip()
+                issues.append(
+                    f"Asset {segment_id} failed ffprobe validation: {stderr or 'unknown ffprobe error'}"
+                )
+                continue
+
+            probe = json.loads(result.stdout)
+            streams = probe.get("streams", [])
+            format_info = probe.get("format", {})
+            has_video = any(stream.get("codec_type") == "video" for stream in streams)
+            has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
+            duration_seconds = float(format_info.get("duration", 0.0) or 0.0)
+            expected_duration_seconds = int(entry.get("duration_ms", 0)) / 1000
+
+            media_assets.append(
+                {
+                    "asset_id": segment_id,
+                    "container": "fmp4",
+                    "has_video": has_video,
+                    "has_audio": has_audio,
+                }
+            )
+
+            if not has_video:
+                issues.append(f"Asset {segment_id} is missing a video stream.")
+
+            if abs(duration_seconds - expected_duration_seconds) > MEDIA_DURATION_TOLERANCE_SECONDS:
+                issues.append(
+                    f"Asset {segment_id} duration mismatch: probed={duration_seconds:.3f}s expected={expected_duration_seconds:.3f}s "
+                    f"(index duration_ms={entry.get('duration_ms', 0)})."
+                )
+
+    return media_assets, issues
 
 
 def _validate_parsed_bvf(parsed: dict[str, Any], profile: str | None = None) -> list[str]:
@@ -224,7 +296,10 @@ def validate_bvf(path: str | Path, profile: str | None = None) -> list[str]:
         return issues
     if issues:
         return issues
-    return _validate_parsed_bvf(parsed, profile=profile)
+    issues = _validate_parsed_bvf(parsed, profile=profile)
+    media_assets, media_issues = _probe_media_assets(parsed)
+    parsed["media_assets"] = media_assets
+    return issues + media_issues
 
 
 def _build_ok_message(path: Path, parsed: dict[str, Any], profile: str | None) -> str:
@@ -246,6 +321,12 @@ def _build_result_payload(
 ) -> dict[str, Any]:
     segment_count = 0
     profile_count = 0
+    media_assets: list[dict[str, Any]] = []
+    media_summary = {
+        "checked_assets": 0,
+        "probeable_assets": 0,
+        "duration_mismatches": 0,
+    }
 
     if parsed is not None:
         manifest = parsed.get("manifest")
@@ -256,8 +337,17 @@ def _build_result_payload(
                 segment_count = len(segments)
             if isinstance(profiles, dict):
                 profile_count = len(profiles)
+        if isinstance(parsed.get("media_assets"), list):
+            media_assets = parsed["media_assets"]
+            media_summary["checked_assets"] = len(parsed.get("segments", []))
+            media_summary["probeable_assets"] = len(media_assets)
+            media_summary["duration_mismatches"] = sum(
+                1 for issue in issues if "duration mismatch" in issue.lower()
+            )
 
     return {
+        "media_assets": media_assets,
+        "media_summary": media_summary,
         "path": str(path),
         "valid": not issues,
         "profile": profile,
@@ -293,6 +383,9 @@ def main(argv: list[str] | None = None) -> int:
         parsed, issues = _read_probe_payload(probe_path)
         if parsed is not None and not issues:
             issues = _validate_parsed_bvf(parsed, profile=args.profile)
+            media_assets, media_issues = _probe_media_assets(parsed)
+            parsed["media_assets"] = media_assets
+            issues.extend(media_issues)
 
     if args.json:
         print(
