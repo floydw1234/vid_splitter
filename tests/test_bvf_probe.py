@@ -235,6 +235,71 @@ def _write_audio_only_bvf(tmp_path: Path) -> Path:
     )
 
 
+def _cut_misaligned_mp4_payload(source: Path, output: Path, *, start: float, duration: float) -> bytes:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-i",
+            str(source),
+            "-t",
+            f"{duration:.3f}",
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof",
+            "-f",
+            "mp4",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return output.read_bytes()
+
+
+def _write_misaligned_media_bvf(tmp_path: Path) -> Path:
+    video = tmp_path / f"misaligned_{uuid.uuid4().hex}.mp4"
+    payload_file = tmp_path / f"misaligned_{uuid.uuid4().hex}_payload.mp4"
+    _create_demo_video(video, duration=3, frequency=440)
+    payload = _cut_misaligned_mp4_payload(
+        video,
+        payload_file,
+        start=0.5,
+        duration=1.5,
+    )
+
+    profiles = {
+        "child": {"name": "Child", "filters": {}},
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 1.5,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": payload,
+        }
+    ]
+    return BvfMuxer(movie_id="misaligned", title="Misaligned").write_bvf(
+        tmp_path / f"misaligned_{uuid.uuid4().hex}.bvf",
+        segments=segments,
+        duration_seconds=1.5,
+        profiles=profiles,
+    )
+
+
 def test_probe_script_header_mentions_diagnostics_purpose():
     probe_script = ROOT / "tools" / "bvf_probe.py"
 
@@ -525,4 +590,29 @@ def test_probe_rejects_media_without_video_stream(tmp_path: Path):
 
     assert result.returncode != 0
     assert "video stream" in result.stdout
+    assert "seg_001" in result.stdout
+
+
+def test_probe_accepts_asset_that_starts_on_a_keyframe(tmp_path: Path):
+    bvf = _write_real_media_bvf(tmp_path)
+
+    result = _run_probe(bvf, "--profile", "child", "--json")
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert payload["valid"] is True
+    assert payload["keyframe_summary"] == {
+        "checked_assets": 1,
+        "keyframe_aligned_assets": 1,
+        "misaligned_assets": 0,
+    }
+
+
+def test_probe_rejects_asset_that_does_not_start_on_a_keyframe(tmp_path: Path):
+    bvf = _write_misaligned_media_bvf(tmp_path)
+
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "keyframe" in result.stdout.lower()
     assert "seg_001" in result.stdout
