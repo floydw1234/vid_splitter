@@ -28,7 +28,6 @@ namespace Jellyfin.Plugin.SmartBranching;
 public class SegmentServer : IMediaSourceProvider
 {
     private const string TokenPrefix = "smart-branch";
-    private const int AssetBlockHeaderSize = 32;
     private static readonly HashSet<string> RuntimeSupportedActions = new(StringComparer.OrdinalIgnoreCase)
     {
         "play",
@@ -186,7 +185,7 @@ public class SegmentServer : IMediaSourceProvider
 
             var liveStream = new BvfLiveStream(
                 CreateMediaSourceInfo(bvfFile, profileKey),
-                () => BuildResolvedStream(bvfFile, resolvedSegments));
+                () => new ResolvedSegmentStream(bvfFile, resolvedSegments));
             return Task.FromResult<ILiveStream>(liveStream);
         }
         catch (Exception ex)
@@ -194,39 +193,6 @@ public class SegmentServer : IMediaSourceProvider
             _logger.LogError(ex, "Failed to open BVF media source");
             throw;
         }
-    }
-
-    private static Stream BuildResolvedStream(string bvfPath, IEnumerable<ResolvedSegment> segments)
-    {
-        var output = new MemoryStream();
-        foreach (var segment in segments)
-        {
-            var bvfSegment = new BVFSegment(
-                0,
-                0,
-                string.Empty,
-                segment.AudioHash,
-                segment.SegmentId,
-                segment.DurationMs,
-                segment.DataOffset,
-                segment.DataLength);
-            var block = BVFReader.ReadSegmentData(bvfPath, bvfSegment);
-            var payload = ExtractMediaPayload(block);
-            output.Write(payload, 0, payload.Length);
-        }
-
-        output.Seek(0, SeekOrigin.Begin);
-        return output;
-    }
-
-    private static byte[] ExtractMediaPayload(byte[] block)
-    {
-        if (block.Length <= AssetBlockHeaderSize)
-            return Array.Empty<byte>();
-
-        var payload = new byte[block.Length - AssetBlockHeaderSize];
-        Buffer.BlockCopy(block, AssetBlockHeaderSize, payload, 0, payload.Length);
-        return payload;
     }
 
     private List<ResolvedSegment> ResolveAllSegmentsForProfile(string bvfPath, string profileKey)
@@ -369,6 +335,8 @@ public class SegmentServer : IMediaSourceProvider
     private sealed class BvfLiveStream : ILiveStream
     {
         private readonly Func<Stream> _streamFactory;
+        private Stream? _currentStream;
+        private bool _disposed;
 
         public BvfLiveStream(MediaSourceInfo mediaSource, Func<Stream> streamFactory)
         {
@@ -390,16 +358,32 @@ public class SegmentServer : IMediaSourceProvider
 
         public Task Close()
         {
+            DisposeCurrentStream();
             return Task.CompletedTask;
         }
 
         public Stream GetStream()
         {
-            return _streamFactory();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            DisposeCurrentStream();
+            _currentStream = _streamFactory();
+            return _currentStream;
         }
 
         public void Dispose()
         {
+            if (_disposed)
+                return;
+
+            DisposeCurrentStream();
+            _disposed = true;
+        }
+
+        private void DisposeCurrentStream()
+        {
+            _currentStream?.Dispose();
+            _currentStream = null;
         }
     }
 }
