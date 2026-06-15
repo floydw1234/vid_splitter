@@ -1,5 +1,8 @@
 from pathlib import Path
 import json
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
 import xml.etree.ElementTree as ET
 
 
@@ -56,6 +59,37 @@ def _find_manifest_path() -> Path | None:
     return None
 
 
+def _package_script_path() -> Path:
+    return _repo_root() / "csharp_plugin" / "scripts" / "package_plugin.py"
+
+
+def _write_fake_build_output(build_dir: Path, *, include_zstd: bool = True) -> None:
+    build_dir.mkdir(parents=True, exist_ok=True)
+    (build_dir / "Jellyfin.Plugin.SmartBranching.dll").write_bytes(b"fake-plugin-dll")
+    (build_dir / "Jellyfin.Plugin.SmartBranching.deps.json").write_text(
+        '{"runtimeTarget":{"name":"net8.0"}}',
+        encoding="utf-8",
+    )
+    if include_zstd:
+        (build_dir / "ZstdSharp.dll").write_bytes(b"fake-zstd-dll")
+
+
+def _run_package_command(build_dir: Path, output_dir: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_package_script_path()),
+            "--build-output",
+            str(build_dir),
+            "--output-dir",
+            str(output_dir),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=_repo_root(),
+    )
+
+
 def test_plugin_metadata_version_matches_directory_build_props():
     build_yaml = _read_build_yaml()
     props_version = _read_directory_build_props_version()
@@ -95,3 +129,56 @@ def test_repository_manifest_is_present_and_complete_if_checked_in():
     latest = versions[0]
     for key in ("version", "targetAbi", "sourceUrl", "checksum", "timestamp"):
         assert key in latest
+
+
+def test_package_command_creates_zip_from_declared_artifacts():
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        build_dir = tmp_path / "build-output"
+        output_dir = tmp_path / "dist"
+        _write_fake_build_output(build_dir)
+
+        result = _run_package_command(build_dir, output_dir)
+
+        assert result.returncode == 0, result.stderr or result.stdout
+        zip_files = list(output_dir.glob("*.zip"))
+        assert len(zip_files) == 1
+
+
+def test_package_command_fails_when_declared_zstd_artifact_is_missing():
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        build_dir = tmp_path / "build-output"
+        output_dir = tmp_path / "dist"
+        _write_fake_build_output(build_dir, include_zstd=False)
+
+        result = _run_package_command(build_dir, output_dir)
+
+        assert result.returncode != 0
+        combined_output = f"{result.stdout}\n{result.stderr}"
+        assert "ZstdSharp.dll" in combined_output
+        assert "missing" in combined_output.lower()
+
+
+def test_package_command_fails_when_metadata_versions_do_not_match():
+    build_yaml_path = _repo_root() / "csharp_plugin" / "build.yaml"
+    original_text = build_yaml_path.read_text(encoding="utf-8")
+    mutated_text = original_text.replace('version: "0.1.0.0"', 'version: "0.1.0.1"', 1)
+
+    assert mutated_text != original_text, "Expected to mutate build.yaml version for the test."
+
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        build_dir = tmp_path / "build-output"
+        output_dir = tmp_path / "dist"
+        _write_fake_build_output(build_dir)
+        build_yaml_path.write_text(mutated_text, encoding="utf-8")
+        try:
+            result = _run_package_command(build_dir, output_dir)
+        finally:
+            build_yaml_path.write_text(original_text, encoding="utf-8")
+
+    assert result.returncode != 0
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    assert "version" in combined_output.lower()
+    assert "mismatch" in combined_output.lower()
