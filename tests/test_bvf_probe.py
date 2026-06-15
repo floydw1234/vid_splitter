@@ -85,6 +85,10 @@ def _rewrite_manifest(path: Path, transform) -> None:
     path.write_bytes(bytes(updated))
 
 
+def _truncate_file(path: Path, size: int) -> None:
+    path.write_bytes(path.read_bytes()[:size])
+
+
 def _run_probe(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "tools/bvf_probe.py", str(path), *args],
@@ -198,3 +202,45 @@ def test_probe_rejects_unsupported_profile_actions(tmp_path: Path):
     assert result.returncode != 0
     assert "Unsupported action" in result.stdout
     assert "explode" in result.stdout
+
+
+def test_probe_rejects_truncated_bvf_with_parse_failure_message(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    _truncate_file(bvf, 8)
+
+    result = _run_probe(bvf)
+
+    assert result.returncode != 0
+    assert "INVALID" in result.stdout
+    assert "Failed to parse BVF:" in result.stdout
+
+
+def test_probe_emits_invalid_json_payload_for_parser_level_corruption(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    _truncate_file(bvf, 8)
+
+    result = _run_probe(bvf, "--json")
+
+    payload = json.loads(result.stdout)
+
+    assert result.returncode != 0
+    assert result.stderr == ""
+    assert payload == {
+        "issues": ["Failed to parse BVF: BVF file header is truncated"],
+        "path": str(bvf),
+        "profile": None,
+        "profile_count": 0,
+        "segment_count": 0,
+        "valid": False,
+    }
+
+
+def test_probe_human_output_includes_high_signal_parse_reason(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    _truncate_file(bvf, 8)
+
+    result = _run_probe(bvf)
+
+    assert result.returncode != 0
+    assert "Failed to parse BVF:" in result.stdout
+    assert "BVF file header is truncated" in result.stdout
