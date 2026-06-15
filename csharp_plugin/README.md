@@ -86,6 +86,27 @@ user into `OpenMediaSource`. To keep playback deterministic, the plugin exposes
 one Smart Branch source per BVF manifest profile and encodes the selected profile
 in the media source open token.
 
+## Verification
+
+Use this checklist when validating the production playback path:
+
+1. Confirm the sibling-file layout is correct.
+   `Movie.bvf` must be in the same directory as `Movie.mp4`; the plugin looks for the `.bvf` by matching the movie stem and directory.
+2. Refresh Jellyfin discovery after generating or replacing the `.bvf`.
+   A successful smoke run should queue an item refresh when the movie is already known to Jellyfin, then poll until Smart Branch media sources appear.
+3. Verify that Jellyfin exposes one Smart Branch media source per BVF manifest profile.
+   The expected source names look like `Smart Branch (adult)` or `Smart Branch (child)`.
+4. Verify playback readiness through Jellyfin's playback-info path.
+   The smoke harness checks that `POST /Items/{itemId}/PlaybackInfo` returns at least one playable media source for the selected Smart Branch source and does not report an `ErrorCode`.
+
+If Smart Branch sources do not appear:
+
+- Re-check that the `.bvf` is a sibling of the movie, not in a subdirectory or alternate library path.
+- Validate the `.bvf` locally with `python3 tools/bvf_probe.py /path/to/Movie.bvf`.
+- Inspect Jellyfin logs for plugin messages.
+  The default server log is typically `/var/log/jellyfin/server.log`.
+  Example: `grep SmartBranching /var/log/jellyfin/server.log`
+
 ## Directory Layout
 
 ```

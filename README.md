@@ -67,3 +67,45 @@ User JSON supports:
 ```bash
 env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_bvf_muxer.py tools/test_bvf_player.py tests/test_cli_e2e.py
 ```
+
+## Jellyfin Smoke
+
+Use the Jellyfin smoke workflow to verify the production path end to end: select a short real video, generate a sibling `.bvf`, validate it locally, refresh Jellyfin discovery, and confirm that Smart Branch sources are exposed and playback-ready.
+
+Required environment variables:
+
+- `JELLYFIN_BASE_URL`
+- `JELLYFIN_API_KEY`
+
+Supported authentication alternative:
+
+- `JELLYFIN_USERNAME`
+- `JELLYFIN_PASSWORD`
+
+Optional environment variables:
+
+- `JELLYFIN_SHORTS_DIR`
+  Defaults to `/mnt/hdds/Videos/shorts` when unset.
+- `RUN_JELLYFIN_SMOKE=1`
+  Required only for the real-environment pytest integration test.
+
+Example invocation:
+
+```bash
+export JELLYFIN_BASE_URL="http://jellyfin.local:8096"
+export JELLYFIN_API_KEY="your-api-key"
+export JELLYFIN_SHORTS_DIR="/mnt/hdds/Videos/shorts"
+python3 tools/jellyfin_smoke.py --dry-run
+```
+
+Optional profile-specific playback check:
+
+```bash
+python3 tools/jellyfin_smoke.py --dry-run --profile child
+```
+
+Skip behavior:
+
+- If `JELLYFIN_BASE_URL` is missing, or neither `JELLYFIN_API_KEY` nor `JELLYFIN_USERNAME`/`JELLYFIN_PASSWORD` is set, the smoke workflow exits with a skip-style message instead of attempting network calls.
+- If no shorts directory is available, or no supported video exists in that directory, the workflow skips with a message that names the missing path or configuration.
+- The real pytest smoke test is opt-in. Without `RUN_JELLYFIN_SMOKE=1`, `tests/test_jellyfin_smoke.py::test_real_jellyfin_smoke_workflow_opt_in` skips by design.
