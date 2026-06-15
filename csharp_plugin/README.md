@@ -49,6 +49,9 @@ Output:
 cd csharp_plugin
 dotnet build SmartBranching.Plugin.sln -c Release
 dotnet test SmartBranching.Plugin.sln -c Release
+python scripts/package_plugin.py \
+  --build-output bin/Release/net8.0 \
+  --output-dir dist
 ```
 
 Output:
@@ -56,26 +59,81 @@ Output:
 - `bin/Release/net8.0/Jellyfin.Plugin.SmartBranching.deps.json`
 - `bin/Release/net8.0/ZstdSharp.dll`
 - `../csharp_plugin.Tests/bin/Release/net8.0/SmartBranching.Plugin.Tests.dll`
+- `dist/smart-branching-0.1.0.0.zip`
 
-### 3. Install in Jellyfin
+The packaging script reads the runtime artifact list and release metadata from `build.yaml`,
+verifies version parity with `Directory.Build.props`, packages only the declared runtime
+artifacts, and updates `manifest.json` for the latest release.
 
-Install is manual today; there is no packaged installer or plugin catalog entry yet.
+### 3. Runtime Artifacts
+
+`build.yaml` is the source of truth for packaged plugin metadata and runtime artifacts:
+
+- `Jellyfin.Plugin.SmartBranching.dll`
+- `Jellyfin.Plugin.SmartBranching.deps.json`
+- `ZstdSharp.dll`
+
+### 4. Install From A Plugin Repository
+
+1. Build and package the plugin so `manifest.json` and the release zip are current.
+2. Publish `manifest.json` at a stable URL and publish the generated `.zip` where the
+   manifest's `sourceUrl` points.
+3. In Jellyfin, open Dashboard -> Plugins -> Repositories.
+4. Add the repository URL that serves this plugin's `manifest.json`.
+5. Open the catalog, install **Smart Branching**, then restart Jellyfin if prompted.
+
+### 5. Manual Offline Install From Zip
+
+1. Build and package the plugin:
 
 ```bash
-sudo mkdir -p /usr/share/jellyfin/data/plugins/SmartBranching
-sudo cp bin/Release/net8.0/Jellyfin.Plugin.SmartBranching.dll /usr/share/jellyfin/data/plugins/SmartBranching/
-sudo cp bin/Release/net8.0/Jellyfin.Plugin.SmartBranching.deps.json /usr/share/jellyfin/data/plugins/SmartBranching/
-sudo cp bin/Release/net8.0/ZstdSharp.dll /usr/share/jellyfin/data/plugins/SmartBranching/
-sudo systemctl restart jellyfin
+cd csharp_plugin
+dotnet build SmartBranching.Plugin.sln -c Release
+python scripts/package_plugin.py \
+  --build-output bin/Release/net8.0 \
+  --output-dir dist
 ```
 
-### 4. Configure
+2. Create the plugin directory in Jellyfin's plugin data path.
+3. Extract `dist/smart-branching-0.1.0.0.zip` into the `SmartBranching` plugin directory.
+4. Restart the Jellyfin server.
+
+The packaged `.zip` is the supported offline install artifact. It contains only the runtime
+files declared in `build.yaml`.
+
+### 6. Update
+
+1. Build a new plugin release and run `package_plugin.py` against the new build output.
+2. If you use a plugin repository, publish the updated `.zip` and refreshed `manifest.json`.
+3. In Jellyfin, update from the repository entry or replace the installed plugin directory
+   with the contents of the new `.zip`.
+4. Restart Jellyfin after the update.
+
+### 7. Uninstall
+
+1. Stop Jellyfin.
+2. Remove the `SmartBranching` plugin directory from Jellyfin's plugins location.
+3. Start or restart the Jellyfin server.
+4. If installed from a custom repository, remove that repository entry from Jellyfin if it
+   is no longer needed.
+
+### 8. Developer-Only Fallback
+
+For local debugging only, you can still copy unpacked build artifacts directly instead of
+using the packaged `.zip`:
+
+1. Create the `SmartBranching` plugin directory under Jellyfin's plugins path, such as
+   `/var/lib/jellyfin/plugins/SmartBranching` on typical Linux installs.
+2. Copy the three runtime artifacts from the build output into that directory.
+3. Restart Jellyfin.
+
+### 9. Configure
 
 1. Open Jellyfin Web UI.
 2. Go to Dashboard -> Plugins -> Smart Branching.
 3. Configure smart branching, default profile, thresholds, filler directory, and per-profile overrides.
 
-### 5. Play
+### 10. Play
 
 1. Place `Movie.bvf` alongside `Movie.mp4`.
 2. Rescan the library.
@@ -113,6 +171,9 @@ python -m pytest tests/test_bvf_muxer.py
 cd csharp_plugin
 dotnet build SmartBranching.Plugin.sln
 dotnet test SmartBranching.Plugin.sln
+python scripts/package_plugin.py \
+  --build-output bin/Debug/net8.0 \
+  --output-dir dist
 ```
 
 ### Enable Plugin Logging
