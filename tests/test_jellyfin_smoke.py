@@ -49,3 +49,40 @@ def test_select_video_candidate_prefers_override_with_video(
 
     assert result.skip_reason is None
     assert result.path == video_path
+
+
+def test_select_video_candidate_filters_extensions_and_uses_deterministic_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    override_dir = tmp_path / "shorts"
+    override_dir.mkdir()
+    (override_dir / "z-last.txt").write_text("ignore me", encoding="utf-8")
+    first_video = override_dir / "a-first.mkv"
+    second_video = override_dir / "b-second.mp4"
+    first_video.write_bytes(b"video one")
+    second_video.write_bytes(b"video two")
+
+    monkeypatch.setenv("JELLYFIN_SHORTS_DIR", str(override_dir))
+
+    result = jellyfin_smoke.select_video_candidate(default_shorts_dir=tmp_path / "missing")
+
+    assert result.skip_reason is None
+    assert result.path == first_video
+
+
+def test_get_bvf_path_maps_movie_to_sibling_bvf():
+    movie_path = Path("/path/Movie.mp4")
+
+    assert jellyfin_smoke.get_bvf_path(movie_path) == Path("/path/Movie.bvf")
+
+
+def test_build_analyzer_command_uses_existing_demo_branch_analyzer(tmp_path: Path):
+    movie_path = tmp_path / "Movie.mp4"
+    output_dir = tmp_path / "library"
+
+    command = jellyfin_smoke.build_analyzer_command(movie_path, output_dir)
+
+    assert command[:3] == [sys.executable, "analyzer/analyze.py", str(movie_path)]
+    assert "--demo-branch" in command
+    assert "--output-dir" in command
+    assert command[-1] == str(output_dir)

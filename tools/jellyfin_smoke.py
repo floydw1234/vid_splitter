@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +51,27 @@ def require_prerequisites_or_skip(config: SmokeConfig) -> None:
         pytest.skip("Missing Jellyfin smoke configuration: " + ", ".join(missing))
 
 
+def list_video_candidates(base_dir: Path) -> list[Path]:
+    return sorted(
+        path for path in base_dir.iterdir() if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+    )
+
+
+def get_bvf_path(movie_path: Path) -> Path:
+    return movie_path.with_suffix(".bvf")
+
+
+def build_analyzer_command(movie_path: Path, output_dir: Path) -> list[str]:
+    return [
+        sys.executable,
+        "analyzer/analyze.py",
+        str(movie_path),
+        "--demo-branch",
+        "--output-dir",
+        str(output_dir),
+    ]
+
+
 def select_video_candidate(default_shorts_dir: Path = DEFAULT_SHORTS_DIR) -> VideoSelectionResult:
     config = load_smoke_config()
     base_dir = Path(config.jellyfin_shorts_dir) if config.jellyfin_shorts_dir else default_shorts_dir
@@ -62,9 +84,7 @@ def select_video_candidate(default_shorts_dir: Path = DEFAULT_SHORTS_DIR) -> Vid
             ),
         )
 
-    candidates = sorted(
-        path for path in base_dir.iterdir() if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
-    )
+    candidates = list_video_candidates(base_dir)
     if not candidates:
         return VideoSelectionResult(
             path=None,
