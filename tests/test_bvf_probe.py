@@ -6,6 +6,10 @@ from pathlib import Path
 
 import zstandard
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from vid_splitter.bvf_muxer import BvfMuxer
 
 
@@ -88,15 +92,26 @@ def _rewrite_manifest(path: Path, transform) -> None:
 def _run_probe(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "tools/bvf_probe.py", str(path), *args],
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
 
 
+def _rewrite_index_entry(path: Path, entry_index: int, *, data_offset: int | None = None, data_length: int | None = None) -> None:
+    raw = bytearray(path.read_bytes())
+    header = BvfMuxer.read_bvf(path)["header"]
+    entry_offset = header["index_offset"] + (entry_index * 40)
+    if data_offset is not None:
+        struct.pack_into("<Q", raw, entry_offset + 16, data_offset)
+    if data_length is not None:
+        struct.pack_into("<Q", raw, entry_offset + 24, data_length)
+    path.write_bytes(bytes(raw))
+
+
 def test_probe_script_header_mentions_diagnostics_purpose():
-    probe_script = Path(__file__).resolve().parents[1] / "tools" / "bvf_probe.py"
+    probe_script = ROOT / "tools" / "bvf_probe.py"
 
     header = "\n".join(probe_script.read_text().splitlines()[:10]).lower()
 
@@ -129,6 +144,21 @@ def test_probe_emits_valid_json_payload(tmp_path: Path):
         "profile_count": 2,
         "segment_count": 2,
         "valid": True,
+    }
+
+
+def test_probe_json_reports_media_validation_summary(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    result = _run_probe(bvf, "--profile", "child", "--json")
+
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert payload["media_summary"] == {
+        "checked_assets": 2,
+        "probeable_assets": 2,
+        "duration_mismatches": 0,
     }
 
 
@@ -198,3 +228,25 @@ def test_probe_rejects_unsupported_profile_actions(tmp_path: Path):
     assert result.returncode != 0
     assert "Unsupported action" in result.stdout
     assert "explode" in result.stdout
+
+
+def test_probe_rejects_index_offsets_outside_the_file(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    file_size = bvf.stat().st_size
+    _rewrite_index_entry(bvf, 0, data_offset=file_size + 4096)
+
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "data_offset" in result.stdout
+    assert "outside the file" in result.stdout
+
+
+def test_probe_rejects_non_probeable_media_payloads(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "ffprobe" in result.stdout
+    assert "seg_001" in result.stdout
