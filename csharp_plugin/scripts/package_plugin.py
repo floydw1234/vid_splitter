@@ -67,8 +67,7 @@ def calculate_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def update_manifest(root: Path, metadata: dict[str, object], zip_path: Path, checksum: str) -> None:
-    path = manifest_path(root)
+def update_manifest(path: Path, metadata: dict[str, object], zip_path: Path, checksum: str) -> None:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     plugin = manifest[0]
     versions = plugin.setdefault("versions", [])
@@ -98,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-output", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--manifest-output")
     return parser.parse_args()
 
 
@@ -108,6 +108,7 @@ def main() -> int:
     props_path = root / "csharp_plugin" / "Directory.Build.props"
     build_output = Path(args.build_output)
     output_dir = Path(args.output_dir)
+    manifest_output = Path(args.manifest_output) if args.manifest_output else manifest_path(root)
 
     metadata = read_build_yaml(build_yaml_path)
     build_yaml_version = metadata.get("version")
@@ -142,7 +143,7 @@ def main() -> int:
             archive.write(artifact_path, arcname=artifact)
 
     checksum = calculate_sha256(zip_path)
-    update_manifest(root, metadata, zip_path, checksum)
+    update_manifest(manifest_output, metadata, zip_path, checksum)
 
     print(zip_path)
     return 0
