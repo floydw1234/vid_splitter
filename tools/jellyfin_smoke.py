@@ -32,6 +32,13 @@ class VideoSelectionResult:
     skip_reason: str | None
 
 
+@dataclass(frozen=True)
+class PlaybackReadinessResult:
+    selected_profile: str
+    selected_source_id: str
+    playable_media_source_count: int
+
+
 class JellyfinApiError(RuntimeError):
     pass
 
@@ -107,6 +114,25 @@ def parse_smart_branch_discovery(payload: dict) -> dict[str, list]:
         "sources": smart_branch_sources,
         "profiles": sorted(set(profiles)),
     }
+
+
+def select_smart_branch_source(discovery: dict[str, list], requested_profile: str | None = None) -> tuple[str, dict]:
+    sources = discovery.get("sources", [])
+    if not sources:
+        raise JellyfinApiError("No Smart Branch sources available for playback readiness check")
+
+    if requested_profile:
+        expected_name = f"Smart Branch ({requested_profile})"
+        for source in sources:
+            if source.get("Name") == expected_name:
+                return requested_profile, source
+        raise JellyfinApiError(f"Requested Smart Branch profile not found: {requested_profile}")
+
+    first_source = sources[0]
+    name = str(first_source.get("Name", ""))
+    if name.startswith("Smart Branch (") and name.endswith(")"):
+        return name[len("Smart Branch (") : -1].strip(), first_source
+    raise JellyfinApiError("Unable to determine default Smart Branch profile source")
 
 
 class JellyfinClient:
@@ -205,6 +231,37 @@ class JellyfinClient:
                 "and verify the sibling .bvf file is present next to the movie."
             )
         return discovery
+
+    def check_playback_readiness(
+        self,
+        item_id: str,
+        discovery: dict[str, list],
+        requested_profile: str | None = None,
+    ) -> PlaybackReadinessResult:
+        selected_profile, selected_source = select_smart_branch_source(
+            discovery,
+            requested_profile=requested_profile,
+        )
+        payload = self._request_json(
+            "POST",
+            f"/Items/{item_id}/PlaybackInfo",
+            body={"MediaSourceId": selected_source["Id"]},
+        )
+        error_code = payload.get("ErrorCode")
+        if error_code:
+            raise JellyfinApiError(f"Playback not ready for profile {selected_profile}: {error_code}")
+
+        media_sources = payload.get("MediaSources", [])
+        if not media_sources:
+            raise JellyfinApiError(
+                f"No playable media sources returned for profile {selected_profile}"
+            )
+
+        return PlaybackReadinessResult(
+            selected_profile=selected_profile,
+            selected_source_id=str(selected_source["Id"]),
+            playable_media_source_count=len(media_sources),
+        )
 
     def _request_json(
         self,

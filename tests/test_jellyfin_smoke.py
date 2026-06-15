@@ -434,3 +434,112 @@ def test_verify_smart_branch_discovery_raises_guidance_when_no_sources_found():
             client.verify_smart_branch_discovery(item_id="movie-123", timeout_seconds=1.0, poll_interval_seconds=0.1)
 
     issue_refresh.assert_called_once_with("movie-123")
+
+
+def test_jellyfin_client_check_playback_readiness_posts_selected_media_source_id():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+    discovery = {
+        "profiles": ["child", "adult"],
+        "sources": [
+            {"Id": "sb-child", "Name": "Smart Branch (child)"},
+            {"Id": "sb-adult", "Name": "Smart Branch (adult)"},
+        ],
+    }
+
+    with mock.patch.object(
+        client,
+        "_request_json",
+        return_value={"MediaSources": [{"Id": "playable-child"}]},
+    ) as request_json:
+        result = client.check_playback_readiness(item_id="movie-123", discovery=discovery, requested_profile="child")
+
+    assert result.selected_profile == "child"
+    assert result.selected_source_id == "sb-child"
+    assert result.playable_media_source_count == 1
+    assert request_json.call_args.args[0:2] == ("POST", "/Items/movie-123/PlaybackInfo")
+    assert request_json.call_args.kwargs["body"]["MediaSourceId"] == "sb-child"
+
+
+def test_jellyfin_client_check_playback_readiness_uses_default_source_when_profile_not_requested():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+    discovery = {
+        "profiles": ["adult", "child"],
+        "sources": [
+            {"Id": "sb-adult", "Name": "Smart Branch (adult)"},
+            {"Id": "sb-child", "Name": "Smart Branch (child)"},
+        ],
+    }
+
+    with mock.patch.object(
+        client,
+        "_request_json",
+        return_value={"MediaSources": [{"Id": "playable-adult"}]},
+    ):
+        result = client.check_playback_readiness(item_id="movie-123", discovery=discovery)
+
+    assert result.selected_profile == "adult"
+    assert result.selected_source_id == "sb-adult"
+
+
+def test_jellyfin_client_check_playback_readiness_raises_when_error_code_returned():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+    discovery = {
+        "profiles": ["child"],
+        "sources": [{"Id": "sb-child", "Name": "Smart Branch (child)"}],
+    }
+
+    with mock.patch.object(
+        client,
+        "_request_json",
+        return_value={"MediaSources": [], "ErrorCode": "NoCompatibleStream"},
+    ):
+        with pytest.raises(jellyfin_smoke.JellyfinApiError, match="NoCompatibleStream"):
+            client.check_playback_readiness(item_id="movie-123", discovery=discovery, requested_profile="child")
+
+
+def test_jellyfin_client_check_playback_readiness_raises_when_no_playable_media_sources_returned():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+    discovery = {
+        "profiles": ["child"],
+        "sources": [{"Id": "sb-child", "Name": "Smart Branch (child)"}],
+    }
+
+    with mock.patch.object(
+        client,
+        "_request_json",
+        return_value={"MediaSources": []},
+    ):
+        with pytest.raises(jellyfin_smoke.JellyfinApiError, match="No playable media sources"):
+            client.check_playback_readiness(item_id="movie-123", discovery=discovery, requested_profile="child")
