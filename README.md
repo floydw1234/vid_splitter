@@ -44,6 +44,18 @@ python3 tools/bvf_player.py /tmp/bvf-demo/demo.bvf --user-json examples/child_us
 python3 tools/bvf_player.py /tmp/bvf-demo/demo.bvf --user-json examples/adult_user.json --export /tmp/bvf-demo/adult.mp4
 ```
 
+Validate the BVF itself:
+
+```bash
+python3 tools/bvf_probe.py /tmp/bvf-demo/demo.bvf --profile child --json
+```
+
+Validate a resolved export against the selected profile timeline:
+
+```bash
+python3 tools/bvf_probe.py /tmp/bvf-demo/demo.bvf --profile child --verify-export /tmp/bvf-demo/child.mp4 --json
+```
+
 Play directly with the reference player:
 
 ```bash
@@ -61,6 +73,25 @@ User JSON supports:
 ```
 
 `profile_override` is optional. Without it, the player resolves profiles from birthday and sex: child under 13, teen_m/teen_f under 18, adult otherwise.
+
+## BVF Validation
+
+`tools/bvf_probe.py` is the validator CLI for production-style BVF outputs.
+
+Prerequisites:
+
+- `ffmpeg`
+- `ffprobe`
+
+It now checks:
+
+- structural offsets and index/header consistency
+- asset block integrity and segment-id matching
+- embedded fMP4/CMAF media probeability
+- duration consistency between BVF index entries and extracted media assets
+- keyframe-boundary alignment for embedded video assets
+- profile resolution for `play`, `swap`, and `skip` actions
+- optional exported MP4 verification against the resolved profile timeline
 
 ## Tests
 
