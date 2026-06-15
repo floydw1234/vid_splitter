@@ -140,3 +140,12 @@ Skip behavior:
 - If `JELLYFIN_BASE_URL` is missing, or neither `JELLYFIN_API_KEY` nor `JELLYFIN_USERNAME`/`JELLYFIN_PASSWORD` is set, the smoke workflow exits with a skip-style message instead of attempting network calls.
 - If no shorts directory is available, or no supported video exists in that directory, the workflow skips with a message that names the missing path or configuration.
 - The real pytest smoke test is opt-in. Without `RUN_JELLYFIN_SMOKE=1`, `tests/test_jellyfin_smoke.py::test_real_jellyfin_smoke_workflow_opt_in` skips by design.
+
+For Jellyfin plugin build/test commands, see `csharp_plugin/README.md`.
+
+Optional real-media smoke checks are intentionally gated because they require
+local media fixtures plus `ffmpeg` / `ffprobe`:
+
+```bash
+RUN_REAL_ANALYZER_TESTS=1 env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_real_video_integration.py -rs
+```

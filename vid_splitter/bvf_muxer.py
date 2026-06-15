@@ -256,6 +256,42 @@ def _compress_manifest(data: bytes) -> bytes:
     return zstandard.ZstdCompressor(level=3).compress(data)
 
 
+def _read_exact(stream: Any, size: int, *, label: str) -> bytes:
+    data = stream.read(size)
+    if len(data) != size:
+        raise ValueError(f"{label} is truncated: expected {size} bytes, got {len(data)}")
+    return data
+
+
+def _validate_file_range(
+    *,
+    offset: int,
+    length: int,
+    file_size: int,
+    label: str,
+) -> None:
+    if offset < 0 or length < 0:
+        raise ValueError(f"{label} must not use negative offsets or lengths")
+    end = offset + length
+    if end > file_size:
+        raise ValueError(
+            f"{label} bytes extend beyond end of file: offset={offset}, "
+            f"length={length}, file_size={file_size}"
+        )
+
+
+def _decode_manifest_bytes(compressed: bytes) -> dict[str, Any]:
+    try:
+        manifest_json = zstandard.ZstdDecompressor().decompress(compressed)
+    except zstandard.ZstdError as exc:
+        raise ValueError("BVF manifest decompression failed") from exc
+
+    try:
+        return json.loads(manifest_json.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("BVF manifest json is invalid") from exc
+
+
 class BvfMuxer:
     """Mux segment metadata and standard media fragments into one BVF file."""
 
@@ -432,23 +468,57 @@ class BvfMuxer:
     def read_bvf(input_path: str | Path) -> dict[str, Any]:
         input_path = Path(input_path)
         with open(input_path, "rb") as f:
-            header_data = f.read(FILE_HEADER_SIZE)
+            file_size = input_path.stat().st_size
+            header_data = _read_exact(f, FILE_HEADER_SIZE, label="BVF file header")
             header = _parse_file_header(header_data)
 
+            _validate_file_range(
+                offset=header["index_offset"],
+                length=header["index_length"],
+                file_size=file_size,
+                label="BVF index",
+            )
             f.seek(header["index_offset"])
             index_entries = []
             for _ in range(header["segment_count"]):
-                index_entries.append(_parse_index_entry(f.read(INDEX_ENTRY_SIZE)))
+                index_entries.append(
+                    _parse_index_entry(
+                        _read_exact(f, INDEX_ENTRY_SIZE, label="BVF index entry")
+                    )
+                )
 
+            _validate_file_range(
+                offset=header["manifest_offset"],
+                length=header["manifest_length"],
+                file_size=file_size,
+                label="BVF manifest",
+            )
             f.seek(header["manifest_offset"])
-            compressed = f.read(header["manifest_length"])
-            manifest_json = zstandard.ZstdDecompressor().decompress(compressed)
-            manifest = json.loads(manifest_json.decode("utf-8"))
+            compressed = _read_exact(
+                f,
+                header["manifest_length"],
+                label="BVF manifest",
+            )
+            manifest = _decode_manifest_bytes(compressed)
 
             asset_headers = []
             for entry in index_entries:
+                _validate_file_range(
+                    offset=entry["data_offset"],
+                    length=ASSET_BLOCK_HEADER_SIZE,
+                    file_size=file_size,
+                    label=f"BVF asset block header for {entry['segment_id']}",
+                )
                 f.seek(entry["data_offset"])
-                asset_headers.append(_parse_block_header(f.read(ASSET_BLOCK_HEADER_SIZE)))
+                asset_headers.append(
+                    _parse_block_header(
+                        _read_exact(
+                            f,
+                            ASSET_BLOCK_HEADER_SIZE,
+                            label=f"BVF asset block header for {entry['segment_id']}",
+                        )
+                    )
+                )
 
         return {
             "header": header,
@@ -459,6 +529,10 @@ class BvfMuxer:
 
 
 def _parse_file_header(data: bytes) -> dict[str, Any]:
+    if len(data) != FILE_HEADER_SIZE:
+        raise ValueError(
+            f"BVF file header is truncated: expected {FILE_HEADER_SIZE} bytes, got {len(data)}"
+        )
     (
         magic,
         version_major,
@@ -489,6 +563,10 @@ def _parse_file_header(data: bytes) -> dict[str, Any]:
 
 
 def _parse_index_entry(data: bytes) -> dict[str, Any]:
+    if len(data) != INDEX_ENTRY_SIZE:
+        raise ValueError(
+            f"BVF index entry is truncated: expected {INDEX_ENTRY_SIZE} bytes, got {len(data)}"
+        )
     segment_id_bytes, data_offset, data_length, duration_ms = struct.unpack(
         "<16s Q Q Q", data
     )

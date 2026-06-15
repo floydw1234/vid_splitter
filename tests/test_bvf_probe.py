@@ -55,6 +55,48 @@ def _write_fixture(tmp_path: Path) -> Path:
     )
 
 
+def _write_probeable_fixture(tmp_path: Path) -> Path:
+    video = tmp_path / f"fixture_{uuid.uuid4().hex}.mp4"
+    payload_file = tmp_path / f"fixture_{uuid.uuid4().hex}_payload.mp4"
+    _create_demo_video(video, duration=2, frequency=440)
+    payload = _remux_mp4_payload(video, payload_file)
+
+    profiles = {
+        "child": {"name": "Child", "filters": {"nudity": "swap"}},
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "tags": ["nudity"],
+            "risk": "mature",
+            "action": "swap",
+            "profile_segment_id": "filler_001",
+            "media_container": "fmp4",
+            "media_payload": payload,
+        },
+        {
+            "id": "filler_001",
+            "start_time": 2.0,
+            "end_time": 4.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "is_filler": True,
+            "media_container": "fmp4",
+            "media_payload": payload,
+        },
+    ]
+    return BvfMuxer(movie_id="fixture", title="Fixture").write_bvf(
+        tmp_path / "fixture_probeable.bvf",
+        segments=segments,
+        duration_seconds=4.0,
+        profiles=profiles,
+    )
+
+
 def _rewrite_manifest(path: Path, transform) -> None:
     parsed = BvfMuxer.read_bvf(path)
     manifest = parsed["manifest"]
@@ -92,6 +134,10 @@ def _rewrite_manifest(path: Path, transform) -> None:
             )
 
     path.write_bytes(bytes(updated))
+
+
+def _truncate_file(path: Path, size: int) -> None:
+    path.write_bytes(path.read_bytes()[:size])
 
 
 def _run_probe(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -309,7 +355,7 @@ def test_probe_script_header_mentions_diagnostics_purpose():
 
 
 def test_probe_accepts_valid_bvf(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
 
     result = _run_probe(bvf, "--profile", "child")
 
@@ -319,7 +365,7 @@ def test_probe_accepts_valid_bvf(tmp_path: Path):
 
 
 def test_probe_emits_valid_json_payload(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
 
     result = _run_probe(bvf, "--profile", "child", "--json")
 
@@ -327,18 +373,17 @@ def test_probe_emits_valid_json_payload(tmp_path: Path):
 
     assert result.returncode == 0
     assert result.stderr == ""
-    assert payload == {
-        "issues": [],
-        "path": str(bvf),
-        "profile": "child",
-        "profile_count": 2,
-        "segment_count": 2,
-        "valid": True,
-    }
+    assert payload["issues"] == []
+    assert payload["path"] == str(bvf)
+    assert payload["profile"] == "child"
+    assert payload["profile_count"] == 2
+    assert payload["segment_count"] == 2
+    assert payload["resolved_profile"] == "child"
+    assert payload["valid"] is True
 
 
 def test_probe_json_reports_media_validation_summary(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
 
     result = _run_probe(bvf, "--profile", "child", "--json")
 
@@ -353,7 +398,7 @@ def test_probe_json_reports_media_validation_summary(tmp_path: Path):
 
 
 def test_probe_rejects_swap_without_target(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
 
     def transform(manifest: dict) -> None:
         manifest["segments"][0]["profiles"]["child"]["segment_id"] = ""
@@ -367,7 +412,7 @@ def test_probe_rejects_swap_without_target(tmp_path: Path):
 
 
 def test_probe_emits_invalid_json_payload(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
 
     def transform(manifest: dict) -> None:
         manifest["segments"][0]["profiles"]["child"]["segment_id"] = ""
@@ -379,21 +424,19 @@ def test_probe_emits_invalid_json_payload(tmp_path: Path):
 
     assert result.returncode != 0
     assert result.stderr == ""
-    assert payload == {
-        "issues": [
-            "Segment seg_001 profile child: swap action requires a non-empty "
-            "target segment_id."
-        ],
-        "path": str(bvf),
-        "profile": "child",
-        "profile_count": 2,
-        "segment_count": 2,
-        "valid": False,
-    }
+    assert payload["issues"] == [
+        "Segment seg_001 profile child: swap action requires a non-empty "
+        "target segment_id."
+    ]
+    assert payload["path"] == str(bvf)
+    assert payload["profile"] == "child"
+    assert payload["profile_count"] == 2
+    assert payload["segment_count"] == 2
+    assert payload["valid"] is False
 
 
 def test_probe_rejects_swap_target_that_does_not_exist(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
 
     def transform(manifest: dict) -> None:
         manifest["segments"][0]["profiles"]["child"]["segment_id"] = "missing_999"
@@ -407,7 +450,7 @@ def test_probe_rejects_swap_target_that_does_not_exist(tmp_path: Path):
 
 
 def test_probe_rejects_unsupported_profile_actions(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
 
     def transform(manifest: dict) -> None:
         manifest["segments"][0]["profiles"]["child"]["action"] = "explode"
@@ -421,7 +464,7 @@ def test_probe_rejects_unsupported_profile_actions(tmp_path: Path):
 
 
 def test_probe_rejects_index_offsets_outside_the_file(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
     file_size = bvf.stat().st_size
     _rewrite_index_entry(bvf, 0, data_offset=file_size + 4096)
 
@@ -443,7 +486,7 @@ def test_probe_rejects_non_probeable_media_payloads(tmp_path: Path):
 
 
 def test_probe_rejects_header_segment_count_mismatch(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
     _rewrite_header_segment_count(bvf, 3)
 
     result = _run_probe(bvf, "--profile", "child")
@@ -455,7 +498,7 @@ def test_probe_rejects_header_segment_count_mismatch(tmp_path: Path):
 
 
 def test_probe_rejects_manifest_segment_count_mismatch(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
 
     def transform(manifest: dict) -> None:
         manifest["segments"].append(
@@ -489,7 +532,7 @@ def test_probe_rejects_manifest_segment_count_mismatch(tmp_path: Path):
 
 
 def test_probe_rejects_index_segment_id_missing_from_manifest_media(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
 
     def transform(manifest: dict) -> None:
         manifest["segments"][0]["media"]["asset_id"] = "renamed_001"
@@ -504,7 +547,7 @@ def test_probe_rejects_index_segment_id_missing_from_manifest_media(tmp_path: Pa
 
 
 def test_probe_rejects_index_data_length_outside_the_file(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
     file_size = bvf.stat().st_size
     parsed = BvfMuxer.read_bvf(bvf)
     entry = parsed["segments"][0]
@@ -522,7 +565,7 @@ def test_probe_rejects_index_data_length_outside_the_file(tmp_path: Path):
 
 
 def test_probe_rejects_asset_block_segment_id_mismatch(tmp_path: Path):
-    bvf = _write_fixture(tmp_path)
+    bvf = _write_probeable_fixture(tmp_path)
     parsed = BvfMuxer.read_bvf(bvf)
     first_offset = parsed["segments"][0]["data_offset"]
 
@@ -557,6 +600,7 @@ def test_probe_accepts_real_media_payload_and_reports_probe_metadata(tmp_path: P
             "container": "fmp4",
             "has_video": True,
             "has_audio": True,
+            "keyframe_aligned": True,
         }
     ]
 
@@ -616,3 +660,44 @@ def test_probe_rejects_asset_that_does_not_start_on_a_keyframe(tmp_path: Path):
     assert result.returncode != 0
     assert "keyframe" in result.stdout.lower()
     assert "seg_001" in result.stdout
+
+def test_probe_rejects_truncated_bvf_with_parse_failure_message(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    _truncate_file(bvf, 8)
+
+    result = _run_probe(bvf)
+
+    assert result.returncode != 0
+    assert "INVALID" in result.stdout
+    assert "Failed to parse BVF:" in result.stdout
+
+
+def test_probe_emits_invalid_json_payload_for_parser_level_corruption(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    _truncate_file(bvf, 8)
+
+    result = _run_probe(bvf, "--json")
+
+    payload = json.loads(result.stdout)
+
+    assert result.returncode != 0
+    assert result.stderr == ""
+    assert payload["issues"] == [
+        "Failed to parse BVF: BVF file header is truncated: expected 64 bytes, got 8"
+    ]
+    assert payload["path"] == str(bvf)
+    assert payload["profile"] is None
+    assert payload["profile_count"] == 0
+    assert payload["segment_count"] == 0
+    assert payload["valid"] is False
+
+
+def test_probe_human_output_includes_high_signal_parse_reason(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    _truncate_file(bvf, 8)
+
+    result = _run_probe(bvf)
+
+    assert result.returncode != 0
+    assert "Failed to parse BVF:" in result.stdout
+    assert "BVF file header is truncated" in result.stdout

@@ -144,6 +144,145 @@ public class BVFReaderManifestTests
         Assert.Empty(segment.Topics);
     }
 
+    [Fact]
+    public void ReadHeader_RejectsTruncatedBvfHeader()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.bvf");
+        File.WriteAllBytes(path, new byte[] { 0x42, 0x56, 0x46, 0x01, 0x00, 0x00, 0x00, 0x00 });
+        using var bvfFile = new TempFile(path);
+
+        var ex = Assert.Throws<InvalidDataException>(() => BVFReader.ReadHeader(bvfFile));
+        Assert.Contains("header", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("truncated", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetSegments_RejectsIndexRegionOutsideFile()
+    {
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 120000,
+              "profiles": {},
+              "segments": []
+            }
+            """;
+
+        using var bvfFile = CreateTempBvf(manifestJson);
+        RewriteUInt64(bvfFile, 16, 10000UL);
+        RewriteUInt64(bvfFile, 24, 10000UL);
+
+        var ex = Assert.Throws<InvalidDataException>(() => BVFReader.GetSegments(bvfFile));
+        Assert.Contains("index", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("outside", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void LoadBvfManifest_RejectsManifestRangeOutsideFile()
+    {
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 120000,
+              "profiles": {},
+              "segments": []
+            }
+            """;
+
+        using var bvfFile = CreateTempBvf(manifestJson);
+        RewriteUInt64(bvfFile, 32, 10000UL);
+        RewriteUInt64(bvfFile, 40, 10000UL);
+
+        var ex = Assert.Throws<InvalidDataException>(() => BVFReader.LoadBvfManifest(bvfFile));
+        Assert.Contains("manifest", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("outside", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetSegments_RejectsTruncatedAssetBlockReads()
+    {
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 120000,
+              "profiles": {},
+              "segments": [
+                {
+                  "id": "seg-001",
+                  "start_ms": 1000,
+                  "end_ms": 5000,
+                  "tags": [],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": {}
+                }
+              ]
+            }
+            """;
+
+        using var bvfFile = CreateTempBvfWithSegment(manifestJson, "seg-001");
+        var assetOffset = ReadUInt64(bvfFile, 80);
+        TruncateFile(bvfFile, checked((int)assetOffset + 8));
+
+        var ex = Assert.Throws<InvalidDataException>(() => BVFReader.GetSegments(bvfFile));
+        Assert.Contains("asset", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("truncated", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetSegments_RejectsInvalidAssetBlockMagic()
+    {
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 120000,
+              "profiles": {},
+              "segments": [
+                {
+                  "id": "seg-001",
+                  "start_ms": 1000,
+                  "end_ms": 5000,
+                  "tags": [],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": {}
+                }
+              ]
+            }
+            """;
+
+        using var bvfFile = CreateTempBvfWithSegment(manifestJson, "seg-001");
+        var assetOffset = ReadUInt64(bvfFile, 80);
+        RewriteUInt32(bvfFile, (long)assetOffset, 0x12345678U);
+
+        var ex = Assert.ThrowsAny<Exception>(() => BVFReader.GetSegments(bvfFile));
+        Assert.Contains("magic", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void LoadBvfManifest_RejectsCorruptZstdManifestPayload()
+    {
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 120000,
+              "profiles": {},
+              "segments": []
+            }
+            """;
+
+        using var bvfFile = CreateTempBvf(manifestJson);
+        RewriteBytes(bvfFile, 64, Encoding.UTF8.GetBytes("not-zstd"));
+
+        var ex = Assert.ThrowsAny<Exception>(() => BVFReader.LoadBvfManifest(bvfFile));
+        Assert.Contains("manifest", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static TempFile CreateTempBvf(string manifestJson)
     {
         var manifestBytes = Encoding.UTF8.GetBytes(manifestJson);
@@ -245,6 +384,40 @@ public class BVFReaderManifestTests
         writer.Flush();
 
         return memory.ToArray();
+    }
+
+    private static void RewriteUInt64(string path, long offset, ulong value)
+    {
+        var bytes = File.ReadAllBytes(path);
+        Array.Copy(BitConverter.GetBytes(value), 0, bytes, offset, sizeof(ulong));
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static void RewriteUInt32(string path, long offset, uint value)
+    {
+        var bytes = File.ReadAllBytes(path);
+        Array.Copy(BitConverter.GetBytes(value), 0, bytes, offset, sizeof(uint));
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static ulong ReadUInt64(string path, long offset)
+    {
+        var bytes = File.ReadAllBytes(path);
+        return BitConverter.ToUInt64(bytes, checked((int)offset));
+    }
+
+    private static void RewriteBytes(string path, long offset, byte[] value)
+    {
+        var bytes = File.ReadAllBytes(path);
+        Array.Copy(value, 0, bytes, offset, value.Length);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static void TruncateFile(string path, int length)
+    {
+        var bytes = File.ReadAllBytes(path);
+        Array.Resize(ref bytes, length);
+        File.WriteAllBytes(path, bytes);
     }
 
     private static void WriteSegmentId(BinaryWriter writer, string segmentId)

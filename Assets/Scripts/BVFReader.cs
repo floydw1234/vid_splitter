@@ -187,10 +187,17 @@ public static class BVFReader
     {
         if (stream == null)
             throw new ArgumentNullException(nameof(stream));
+        if (!stream.CanSeek)
+            throw new InvalidDataException("BVF stream must support seeking.");
 
         stream.Seek(0, SeekOrigin.Begin);
         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
         var header = ReadHeader(reader);
+
+        var streamLength = stream.Length;
+
+        ValidateRange(header.IndexOffset, header.IndexLength, streamLength, "BVF index");
+        ValidateRange(header.ManifestOffset, header.ManifestLength, streamLength, "BVF manifest");
 
         var expectedIndexLength = header.SegmentCount * (ulong)INDEX_ENTRY_SIZE;
         if (header.IndexLength != expectedIndexLength)
@@ -214,6 +221,7 @@ public static class BVFReader
         var segments = new List<BVFSegment>((int)header.SegmentCount);
         foreach (var entry in indexEntries)
         {
+            ValidateRange(entry.DataOffset, (ulong)ASSET_BLOCK_HEADER_SIZE, streamLength, $"BVF asset block header for '{entry.SegmentId}'");
             segments.Add(ParseSegment(stream, entry, manifestMap, readSegmentPayloads));
         }
 
@@ -222,22 +230,26 @@ public static class BVFReader
 
     private static BVFHeader ReadHeader(BinaryReader reader)
     {
-        var magic = reader.ReadUInt64();
+        var headerBytes = ReadExact(reader.BaseStream, 64, "BVF file header");
+        using var headerStream = new MemoryStream(headerBytes, writable: false);
+        using var headerReader = new BinaryReader(headerStream, Encoding.UTF8, leaveOpen: false);
+
+        var magic = headerReader.ReadUInt64();
         if (magic != BVF_MAGIC)
             throw new InvalidDataException($"Invalid BVF magic: expected 0x{BVF_MAGIC:X8}, got 0x{magic:X8}");
 
         var header = new BVFHeader
         {
-            VersionMajor = reader.ReadUInt16(),
-            VersionMinor = reader.ReadUInt16(),
-            Flags = reader.ReadUInt32(),
-            IndexOffset = reader.ReadUInt64(),
-            IndexLength = reader.ReadUInt64(),
-            ManifestOffset = reader.ReadUInt64(),
-            ManifestLength = reader.ReadUInt64(),
-            SegmentCount = reader.ReadUInt32(),
-            TotalDurationMs = reader.ReadUInt64(),
-            Reserved = reader.ReadUInt32(),
+            VersionMajor = headerReader.ReadUInt16(),
+            VersionMinor = headerReader.ReadUInt16(),
+            Flags = headerReader.ReadUInt32(),
+            IndexOffset = headerReader.ReadUInt64(),
+            IndexLength = headerReader.ReadUInt64(),
+            ManifestOffset = headerReader.ReadUInt64(),
+            ManifestLength = headerReader.ReadUInt64(),
+            SegmentCount = headerReader.ReadUInt32(),
+            TotalDurationMs = headerReader.ReadUInt64(),
+            Reserved = headerReader.ReadUInt32(),
         };
 
         if (header.VersionMajor > 1)
@@ -251,8 +263,9 @@ public static class BVFReader
 
     private static ManifestData ReadManifest(Stream stream, ulong manifestOffset, ulong manifestLength)
     {
+        ValidateRange(manifestOffset, manifestLength, stream.Length, "BVF manifest");
         stream.Seek((long)manifestOffset, SeekOrigin.Begin);
-        var compressedData = ReadExact(stream, checked((int)manifestLength));
+        var compressedData = ReadExact(stream, checked((int)manifestLength), "BVF manifest");
 
         byte[] decompressed;
         try
@@ -265,10 +278,20 @@ public static class BVFReader
             throw new InvalidDataException("Failed to decompress BVF manifest with zstd.", ex);
         }
 
-        var json = Encoding.UTF8.GetString(decompressed);
-        var manifest = JsonSerializer.Deserialize<ManifestData>(json, _jsonOptions);
+        ManifestData? manifest;
+        try
+        {
+            var json = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+                .GetString(decompressed);
+            manifest = JsonSerializer.Deserialize<ManifestData>(json, _jsonOptions);
+        }
+        catch (Exception ex) when (ex is DecoderFallbackException or JsonException)
+        {
+            throw new InvalidDataException("Failed to parse BVF manifest JSON.", ex);
+        }
+
         if (manifest == null)
-            throw new InvalidDataException("Failed to parse BVF manifest JSON");
+            throw new InvalidDataException("Failed to parse BVF manifest JSON.");
 
         return manifest;
     }
@@ -317,6 +340,7 @@ public static class BVFReader
 
     private static string ComputeAudioHash(Stream stream, BVFIndexEntry entry)
     {
+        ValidateRange(entry.DataOffset, (ulong)ASSET_BLOCK_HEADER_SIZE, stream.Length, $"BVF asset block header for '{entry.SegmentId}'");
         stream.Seek((long)entry.DataOffset, SeekOrigin.Begin);
         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
 
@@ -337,7 +361,7 @@ public static class BVFReader
         if (payloadLength <= 0)
             return string.Empty;
 
-        var payload = reader.ReadBytes(payloadLength);
+        var payload = ReadExact(stream, payloadLength, $"BVF asset payload for '{entry.SegmentId}'");
         return Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
     }
 
@@ -379,7 +403,7 @@ public static class BVFReader
         return branchManifest;
     }
 
-    private static byte[] ReadExact(Stream stream, int count)
+    private static byte[] ReadExact(Stream stream, int count, string label)
     {
         var buffer = new byte[count];
         var offset = 0;
@@ -387,12 +411,23 @@ public static class BVFReader
         {
             var read = stream.Read(buffer, offset, count - offset);
             if (read == 0)
-                throw new EndOfStreamException($"Unexpected end of BVF stream while reading {count} bytes.");
+                throw new InvalidDataException($"{label} is truncated: expected {count} bytes, got {offset}.");
 
             offset += read;
         }
 
         return buffer;
+    }
+
+    private static void ValidateRange(ulong offset, ulong length, long streamLength, string label)
+    {
+        var maxLength = checked((ulong)streamLength);
+        if (offset > maxLength)
+            throw new InvalidDataException(
+                $"{label} is outside the BVF stream: offset={offset}, length={length}, streamLength={maxLength}.");
+        if (length > maxLength - offset)
+            throw new InvalidDataException(
+                $"{label} is truncated: offset={offset}, length={length}, streamLength={maxLength}.");
     }
 
     private struct BVFHeader

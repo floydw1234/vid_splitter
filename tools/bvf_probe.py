@@ -93,7 +93,10 @@ def _read_probe_payload(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
     raw = path.read_bytes()
 
     if len(raw) < FILE_HEADER_SIZE:
-        return None, ["File is too small to contain a BVF header"]
+        return None, [
+            "Failed to parse BVF: "
+            f"BVF file header is truncated: expected {FILE_HEADER_SIZE} bytes, got {len(raw)}"
+        ]
 
     try:
         header = _parse_file_header(raw[:FILE_HEADER_SIZE])
@@ -529,6 +532,26 @@ def _build_result_payload(
     }
 
 
+def _load_probe_result(
+    path: str | Path,
+    profile: str | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    probe_path = Path(path)
+    if not probe_path.exists():
+        return None, [f"File does not exist: {probe_path}"]
+    if not probe_path.is_file():
+        return None, [f"Path is not a file: {probe_path}"]
+
+    parsed, issues = _read_probe_payload(probe_path)
+    if parsed is None or issues:
+        return parsed, issues
+
+    validation_issues = _validate_parsed_bvf(parsed, profile=profile)
+    media_assets, media_issues = _probe_media_assets(parsed)
+    parsed["media_assets"] = media_assets
+    return parsed, validation_issues + media_issues
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate BVF structure for playback")
     parser.add_argument("path", help="Path to the .bvf file")
@@ -547,41 +570,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    parsed: dict[str, Any] | None = None
-    issues: list[str]
-
     probe_path = Path(args.path)
-    if not probe_path.exists():
-        issues = [f"File does not exist: {probe_path}"]
-    elif not probe_path.is_file():
-        issues = [f"Path is not a file: {probe_path}"]
-    else:
-        parsed, issues = _read_probe_payload(probe_path)
-        if parsed is not None and not issues:
-            issues = _validate_parsed_bvf(parsed, profile=args.profile)
-            media_assets, media_issues = _probe_media_assets(parsed)
-            parsed["media_assets"] = media_assets
-            issues.extend(media_issues)
-            resolved_profile, resolved_segments, resolved_duration_ms = _resolve_profile_segments(
-                parsed,
-                args.profile,
-            )
-            parsed["resolved_profile"] = resolved_profile
-            parsed["resolved_segments"] = resolved_segments
-            parsed["resolved_duration_ms"] = resolved_duration_ms
-            if args.verify_export:
-                export_path = Path(args.verify_export)
-                export_summary = _probe_video_file(export_path)
-                if not export_summary["has_video"]:
-                    issues.append(f"Exported file {export_path} is missing a video stream.")
-                if abs(export_summary["duration_ms"] - resolved_duration_ms) > int(MEDIA_DURATION_TOLERANCE_SECONDS * 1000):
-                    issues.append(
-                        f"Exported file {export_path} duration mismatch: "
-                        f"probed={export_summary['duration_ms']}ms expected={resolved_duration_ms}ms."
-                    )
-                else:
-                    export_summary["duration_ms"] = resolved_duration_ms
-                parsed["export_summary"] = export_summary
+    parsed, issues = _load_probe_result(probe_path, profile=args.profile)
+    if parsed is not None and not issues:
+        resolved_profile, resolved_segments, resolved_duration_ms = _resolve_profile_segments(
+            parsed,
+            args.profile,
+        )
+        parsed["resolved_profile"] = resolved_profile
+        parsed["resolved_segments"] = resolved_segments
+        parsed["resolved_duration_ms"] = resolved_duration_ms
+        if args.verify_export:
+            export_path = Path(args.verify_export)
+            export_summary = _probe_video_file(export_path)
+            if not export_summary["has_video"]:
+                issues.append(f"Exported file {export_path} is missing a video stream.")
+            if abs(export_summary["duration_ms"] - resolved_duration_ms) > int(
+                MEDIA_DURATION_TOLERANCE_SECONDS * 1000
+            ):
+                issues.append(
+                    f"Exported file {export_path} duration mismatch: "
+                    f"probed={export_summary['duration_ms']}ms expected={resolved_duration_ms}ms."
+                )
+            else:
+                export_summary["duration_ms"] = resolved_duration_ms
+            parsed["export_summary"] = export_summary
 
     if args.json:
         print(

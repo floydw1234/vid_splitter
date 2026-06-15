@@ -37,7 +37,7 @@ public class SegmentServer : IMediaSourceProvider
 
     private readonly ILogger<SegmentServer> _logger;
     private readonly ProfileResolver _profileResolver;
-    private readonly Dictionary<string, BranchManifest> _bvfManifestCache = new();
+    private readonly BvfManifestCache _bvfManifestCache = new();
 
     public SegmentServer(
         ILogger<SegmentServer> logger,
@@ -53,14 +53,25 @@ public class SegmentServer : IMediaSourceProvider
     /// </summary>
     private BranchManifest GetBvfManifest(string bvfPath)
     {
-        if (_bvfManifestCache.TryGetValue(bvfPath, out var cached))
-            return cached;
-
         try
         {
-            var manifest = BVFReader.LoadBvfManifest(bvfPath);
-            _bvfManifestCache[bvfPath] = manifest;
-            return manifest;
+            var result = _bvfManifestCache.GetOrLoad(bvfPath, path => BVFReader.LoadBvfManifest(path));
+            switch (result.Disposition)
+            {
+                case BvfManifestCache.CacheDisposition.Hit:
+                    _logger.LogDebug("BVF cache hit for {Path}", bvfPath);
+                    break;
+                case BvfManifestCache.CacheDisposition.Miss:
+                    _logger.LogDebug("BVF cache miss for {Path}", bvfPath);
+                    break;
+                case BvfManifestCache.CacheDisposition.Invalidated:
+                    _logger.LogInformation(
+                        "BVF cache invalidated for {Path} because file metadata changed",
+                        bvfPath);
+                    break;
+            }
+
+            return result.Manifest;
         }
         catch (Exception ex)
         {
