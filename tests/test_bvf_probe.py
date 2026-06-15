@@ -226,7 +226,9 @@ def test_probe_emits_invalid_json_payload_for_parser_level_corruption(tmp_path: 
     assert result.returncode != 0
     assert result.stderr == ""
     assert payload == {
-        "issues": ["Failed to parse BVF: BVF file header is truncated"],
+        "issues": [
+            "Failed to parse BVF: BVF file header is truncated: expected 64 bytes, got 8"
+        ],
         "path": str(bvf),
         "profile": None,
         "profile_count": 0,

@@ -91,19 +91,8 @@ def _validate_parsed_bvf(parsed: dict[str, Any], profile: str | None = None) -> 
 
 
 def validate_bvf(path: str | Path, profile: str | None = None) -> list[str]:
-    bvf_path = Path(path)
-
-    if not bvf_path.exists():
-        return [f"File does not exist: {bvf_path}"]
-    if not bvf_path.is_file():
-        return [f"Path is not a file: {bvf_path}"]
-
-    try:
-        parsed = BvfMuxer.read_bvf(bvf_path)
-    except Exception as exc:
-        return [f"Failed to parse BVF: {exc}"]
-
-    return _validate_parsed_bvf(parsed, profile=profile)
+    _, issues = _load_probe_result(path, profile=profile)
+    return issues
 
 
 def _build_ok_message(path: Path, parsed: dict[str, Any], profile: str | None) -> str:
@@ -146,6 +135,24 @@ def _build_result_payload(
     }
 
 
+def _load_probe_result(
+    path: str | Path,
+    profile: str | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    probe_path = Path(path)
+    if not probe_path.exists():
+        return None, [f"File does not exist: {probe_path}"]
+    if not probe_path.is_file():
+        return None, [f"Path is not a file: {probe_path}"]
+
+    try:
+        parsed = BvfMuxer.read_bvf(probe_path)
+    except Exception as exc:
+        return None, [f"Failed to parse BVF: {exc}"]
+
+    return parsed, _validate_parsed_bvf(parsed, profile=profile)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate BVF structure for playback")
     parser.add_argument("path", help="Path to the .bvf file")
@@ -160,21 +167,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    parsed: dict[str, Any] | None = None
-    issues: list[str]
-
     probe_path = Path(args.path)
-    if not probe_path.exists():
-        issues = [f"File does not exist: {probe_path}"]
-    elif not probe_path.is_file():
-        issues = [f"Path is not a file: {probe_path}"]
-    else:
-        try:
-            parsed = BvfMuxer.read_bvf(probe_path)
-        except Exception as exc:
-            issues = [f"Failed to parse BVF: {exc}"]
-        else:
-            issues = _validate_parsed_bvf(parsed, profile=args.profile)
+    parsed, issues = _load_probe_result(probe_path, profile=args.profile)
 
     if args.json:
         print(
