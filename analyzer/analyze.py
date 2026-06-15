@@ -14,9 +14,11 @@ Usage:
 """
 import sys
 import argparse
+import json
 import logging
 import subprocess
 import tempfile
+from bisect import bisect_left
 from pathlib import Path
 from datetime import datetime
 
@@ -173,6 +175,8 @@ class MovieAnalyzer:
         # 5b. Classify segments for topics using LLM
         logger.info("Classifying segments for topics with LLM...")
         segments = self._classify_topics(segments)
+
+        segments = self._snap_segments_to_keyframes(segments, self.video_path, duration)
 
         # 6. Generate manifest
         manifest = self._build_manifest(segments, duration)
@@ -915,12 +919,96 @@ class MovieAnalyzer:
             seg["id"] = f"seg_{narrative_index:03d}"
             narrative_index += 1
 
+        segments = self._snap_segments_to_keyframes(segments, self.video_path, duration)
         manifest = self._build_manifest(segments, duration)
         self._attach_media_assets(manifest["segments"])
         output_bvf = self._save_bvf(manifest)
         self.last_bvf_path = output_bvf
         logger.info(f"BVF saved to: {output_bvf}")
         return manifest
+
+    def _get_keyframe_times(self, video_path: Path) -> list[float]:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-skip_frame", "nokey",
+                "-show_frames",
+                "-show_entries", "frame=best_effort_timestamp_time",
+                "-of", "json",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payload = json.loads(result.stdout)
+        keyframes = []
+        for frame in payload.get("frames", []):
+            timestamp = frame.get("best_effort_timestamp_time")
+            if timestamp is None:
+                continue
+            keyframes.append(float(timestamp))
+        if not keyframes or keyframes[0] > 0.001:
+            keyframes.insert(0, 0.0)
+        return sorted(set(round(ts, 3) for ts in keyframes))
+
+    @staticmethod
+    def _nearest_keyframe(target: float, keyframes: list[float]) -> float:
+        if not keyframes:
+            return round(target, 3)
+        idx = bisect_left(keyframes, target)
+        if idx <= 0:
+            return keyframes[0]
+        if idx >= len(keyframes):
+            return keyframes[-1]
+        before = keyframes[idx - 1]
+        after = keyframes[idx]
+        if abs(after - target) < abs(target - before):
+            return after
+        return before
+
+    def _snap_segments_to_keyframes(
+        self,
+        segments: list[dict],
+        source_path: Path,
+        duration: float,
+    ) -> list[dict]:
+        keyframes = self._get_keyframe_times(source_path)
+        if not keyframes:
+            return segments
+
+        boundaries = [0.0]
+        for seg in segments:
+            if seg.get("is_filler"):
+                continue
+            boundaries.append(float(seg["end_time"]))
+
+        snapped = [0.0]
+        for boundary in boundaries[1:-1]:
+            snapped.append(self._nearest_keyframe(boundary, keyframes))
+        snapped.append(round(duration, 3))
+
+        normalized = [snapped[0]]
+        for boundary in snapped[1:]:
+            boundary = round(boundary, 3)
+            if boundary < normalized[-1]:
+                boundary = normalized[-1]
+            normalized.append(boundary)
+
+        snapped_segments: list[dict] = []
+        narrative_index = 0
+        for seg in segments:
+            updated = dict(seg)
+            if updated.get("is_filler"):
+                snapped_segments.append(updated)
+                continue
+            updated["start_time"] = round(normalized[narrative_index], 3)
+            updated["end_time"] = round(normalized[narrative_index + 1], 3)
+            narrative_index += 1
+            snapped_segments.append(updated)
+        return [seg for seg in snapped_segments if seg["end_time"] > seg["start_time"]]
 
     def _resolve_demo_filler_duration(self, default_duration: float) -> float:
         filler_duration = self.demo_filler_duration or default_duration

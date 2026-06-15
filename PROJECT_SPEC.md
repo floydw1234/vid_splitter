@@ -271,8 +271,8 @@ vid_splitter/
 ### Phase 3: BVF Toolchain
 * [x] `bvf_muxer.py` — writes `.bvf` containers from analyzer segments
 * [x] `bvf_player.py` — reference player: reads `.bvf`, resolves profile, plays via ffplay
-* [ ] Keyframe alignment verification tool
-* [ ] BVF file validation tool
+* [x] Keyframe alignment verification in `bvf_probe.py`
+* [x] BVF file validation tool (`bvf_probe.py`)
 
 ### Phase 4: End-to-End
 * [ ] Create test video with known mature content
@@ -303,3 +303,27 @@ vid_splitter/
 * **GPU** — Safety Checker can run on GPU for faster frame classification.
 * **Keyframe alignment** — mandatory IDR/keyframe at every segment boundary; analyzer snaps boundaries to nearest keyframe.
 * **Profile system** — explicit user data (birthday + sex) stored in plugin config, no dependency on Jellyfin's rating infrastructure.
+
+## 10. Validator CLI
+
+**File:** `tools/bvf_probe.py`
+
+**Prerequisites:**
+* `ffmpeg`
+* `ffprobe`
+
+**Examples:**
+
+```bash
+python3 tools/bvf_probe.py movie.bvf --profile child --json
+python3 tools/bvf_probe.py movie.bvf --profile child --verify-export child.mp4 --json
+```
+
+**What it validates:**
+* Structural offsets and header/index/manifest consistency
+* Asset block parsing and segment-id matching
+* Embedded fMP4/CMAF media validity through `ffprobe`
+* Duration consistency between BVF index entries, embedded assets, and optional exports
+* Keyframe-boundary alignment for embedded video assets
+* Profile resolution for `play`, `swap`, and `skip`
+* Optional exported MP4 verification against the resolved profile timeline

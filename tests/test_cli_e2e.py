@@ -1,14 +1,17 @@
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from vid_splitter.bvf_muxer import BvfMuxer
 
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run(cmd: list[str], cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
@@ -70,6 +73,81 @@ def _write_cli_fixture(tmp_path: Path) -> Path:
     ]
     return BvfMuxer(movie_id="fixture", title="Fixture").write_bvf(
         tmp_path / "fixture.bvf",
+        segments=segments,
+        duration_seconds=6.0,
+        profiles=profiles,
+    )
+
+
+def _remux_mp4_payload(source: Path, output: Path) -> bytes:
+    _run([
+        "ffmpeg", "-y",
+        "-i", str(source),
+        "-map", "0:v:0?",
+        "-map", "0:a:0?",
+        "-c", "copy",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4",
+        str(output),
+    ])
+    return output.read_bytes()
+
+
+def _write_real_cli_fixture(tmp_path: Path) -> Path:
+    safe_video = tmp_path / f"safe_{uuid.uuid4().hex}.mp4"
+    mature_video = tmp_path / f"mature_{uuid.uuid4().hex}.mp4"
+    filler_video = tmp_path / f"filler_{uuid.uuid4().hex}.mp4"
+    _create_demo_video(safe_video, duration=2, frequency=440)
+    _create_demo_video(mature_video, duration=2, frequency=550)
+    _create_demo_video(filler_video, duration=2, frequency=880)
+
+    safe_payload = _remux_mp4_payload(safe_video, tmp_path / f"safe_{uuid.uuid4().hex}_payload.mp4")
+    mature_payload = _remux_mp4_payload(mature_video, tmp_path / f"mature_{uuid.uuid4().hex}_payload.mp4")
+    filler_payload = _remux_mp4_payload(filler_video, tmp_path / f"filler_{uuid.uuid4().hex}_payload.mp4")
+
+    profiles = {
+        "child": {"name": "Child", "filters": {}},
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": safe_payload,
+        },
+        {
+            "id": "seg_002",
+            "start_time": 2.0,
+            "end_time": 4.0,
+            "tags": ["gore"],
+            "risk": "mature",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": mature_payload,
+            "profiles": {
+                "child": {"action": "swap", "segment_id": "filler_001"},
+                "adult": {"action": "play", "segment_id": "seg_002"},
+            },
+        },
+        {
+            "id": "filler_001",
+            "start_time": 4.0,
+            "end_time": 6.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": filler_payload,
+            "is_filler": True,
+        },
+    ]
+    return BvfMuxer(movie_id="fixture", title="Fixture").write_bvf(
+        tmp_path / f"fixture_{uuid.uuid4().hex}.bvf",
         segments=segments,
         duration_seconds=6.0,
         profiles=profiles,
@@ -268,3 +346,176 @@ def test_list_json_cli_reflects_resolved_swap_sequence(tmp_path: Path):
             "start_ms": 2000,
         },
     ]
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0
+    or subprocess.run(["which", "ffprobe"], capture_output=True).returncode != 0,
+    reason="ffmpeg/ffprobe are required for CLI E2E smoke test",
+)
+def test_bvf_probe_json_reports_profile_resolved_targets(tmp_path: Path):
+    bvf = _write_real_cli_fixture(tmp_path)
+
+    child = _run([
+        sys.executable,
+        "tools/bvf_probe.py",
+        str(bvf),
+        "--profile",
+        "child",
+        "--json",
+    ])
+    adult = _run([
+        sys.executable,
+        "tools/bvf_probe.py",
+        str(bvf),
+        "--profile",
+        "adult",
+        "--json",
+    ])
+
+    child_payload = json.loads(child.stdout)
+    adult_payload = json.loads(adult.stdout)
+
+    assert child_payload["valid"] is True
+    assert child_payload["resolved_profile"] == "child"
+    assert child_payload["resolved_segments"] == [
+        {"segment_id": "seg_001", "selected_asset_id": "seg_001", "action": "play"},
+        {"segment_id": "seg_002", "selected_asset_id": "filler_001", "action": "swap"},
+    ]
+
+    assert adult_payload["valid"] is True
+    assert adult_payload["resolved_profile"] == "adult"
+    assert adult_payload["resolved_segments"] == [
+        {"segment_id": "seg_001", "selected_asset_id": "seg_001", "action": "play"},
+        {"segment_id": "seg_002", "selected_asset_id": "seg_002", "action": "play"},
+    ]
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0
+    or subprocess.run(["which", "ffprobe"], capture_output=True).returncode != 0,
+    reason="ffmpeg/ffprobe are required for CLI E2E smoke test",
+)
+def test_bvf_probe_can_verify_exported_mp4_against_profile_timeline(tmp_path: Path):
+    bvf = _write_real_cli_fixture(tmp_path)
+    child_export = tmp_path / "child_export.mp4"
+    adult_export = tmp_path / "adult_export.mp4"
+
+    _run([sys.executable, "tools/bvf_player.py", str(bvf), "--profile", "child", "--export", str(child_export)])
+    _run([sys.executable, "tools/bvf_player.py", str(bvf), "--profile", "adult", "--export", str(adult_export)])
+
+    child = _run([
+        sys.executable,
+        "tools/bvf_probe.py",
+        str(bvf),
+        "--profile",
+        "child",
+        "--verify-export",
+        str(child_export),
+        "--json",
+    ])
+    adult = _run([
+        sys.executable,
+        "tools/bvf_probe.py",
+        str(bvf),
+        "--profile",
+        "adult",
+        "--verify-export",
+        str(adult_export),
+        "--json",
+    ])
+
+    child_payload = json.loads(child.stdout)
+    adult_payload = json.loads(adult.stdout)
+
+    assert child_payload["valid"] is True
+    assert child_payload["export_summary"] == {
+        "path": str(child_export),
+        "has_video": True,
+        "has_audio": True,
+        "duration_ms": 4000,
+    }
+
+    assert adult_payload["valid"] is True
+    assert adult_payload["export_summary"] == {
+        "path": str(adult_export),
+        "has_video": True,
+        "has_audio": True,
+        "duration_ms": 4000,
+    }
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0
+    or subprocess.run(["which", "ffprobe"], capture_output=True).returncode != 0,
+    reason="ffmpeg/ffprobe are required for CLI E2E smoke test",
+)
+def test_demo_branch_bvf_passes_keyframe_validation(tmp_path: Path):
+    video = tmp_path / "demo.mp4"
+    _create_demo_video(video, duration=6, frequency=440)
+
+    analyze = _run([
+        sys.executable,
+        "analyzer/analyze.py",
+        str(video),
+        "--demo-branch",
+        "--output-dir",
+        str(tmp_path),
+    ])
+    assert "BVF:" in analyze.stdout
+
+    bvf = tmp_path / "demo.bvf"
+    result = _run([
+        sys.executable,
+        "tools/bvf_probe.py",
+        str(bvf),
+        "--profile",
+        "child",
+        "--json",
+    ])
+    payload = json.loads(result.stdout)
+
+    assert payload["valid"] is True
+    assert payload["keyframe_summary"] == {
+        "checked_assets": 3,
+        "keyframe_aligned_assets": 3,
+        "misaligned_assets": 0,
+    }
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0
+    or subprocess.run(["which", "ffprobe"], capture_output=True).returncode != 0,
+    reason="ffmpeg/ffprobe are required for CLI E2E smoke test",
+)
+def test_demo_branch_snaps_non_gop_aligned_boundaries_to_keyframes(tmp_path: Path):
+    video = tmp_path / "odd_duration.mp4"
+    _create_demo_video(video, duration=5, frequency=440)
+
+    analyze = _run([
+        sys.executable,
+        "analyzer/analyze.py",
+        str(video),
+        "--demo-branch",
+        "--output-dir",
+        str(tmp_path),
+    ])
+    assert "BVF:" in analyze.stdout
+
+    bvf = tmp_path / "odd_duration.bvf"
+    result = _run([
+        sys.executable,
+        "tools/bvf_probe.py",
+        str(bvf),
+        "--profile",
+        "child",
+        "--json",
+    ])
+    payload = json.loads(result.stdout)
+
+    assert payload["valid"] is True
+    assert payload["keyframe_summary"] == {
+        "checked_assets": 3,
+        "keyframe_aligned_assets": 3,
+        "misaligned_assets": 0,
+    }

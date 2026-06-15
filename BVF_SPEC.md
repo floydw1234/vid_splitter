@@ -155,3 +155,30 @@ segment must be independently decodable by FFmpeg/Jellyfin after extraction.
 
 The preferred production serving path is to expose resolved fMP4 fragments to
 Jellyfin/FFmpeg instead of parsing codec packets inside BVF code.
+
+## 7. Validation Workflow
+
+Reference validation is provided by `tools/bvf_probe.py`.
+
+Prerequisites:
+
+- `ffmpeg`
+- `ffprobe`
+
+Typical usage:
+
+```bash
+python3 tools/bvf_probe.py movie.bvf --profile child --json
+python3 tools/bvf_probe.py movie.bvf --profile child --verify-export child.mp4 --json
+```
+
+The validator checks:
+
+- header/index/manifest consistency
+- segment `data_offset` / `data_length` bounds and `BVA\0` asset block parsing
+- index `segment_id` and manifest/media asset-id consistency
+- embedded fMP4/CMAF media probeability via `ffprobe`
+- duration consistency between BVF index entries and extracted assets
+- keyframe-boundary alignment for embedded video assets
+- resolved profile playback targets for `play`, `swap`, and `skip`
+- optional exported MP4 verification against the resolved profile timeline
