@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -25,6 +28,10 @@ class SmokeConfig:
 class VideoSelectionResult:
     path: Path | None
     skip_reason: str | None
+
+
+class JellyfinApiError(RuntimeError):
+    pass
 
 
 def load_smoke_config() -> SmokeConfig:
@@ -49,6 +56,98 @@ def require_prerequisites_or_skip(config: SmokeConfig) -> None:
 
     if missing:
         pytest.skip("Missing Jellyfin smoke configuration: " + ", ".join(missing))
+
+
+def build_api_key_headers(api_key: str) -> dict[str, str]:
+    return {
+        "Accept": "application/json",
+        "Authorization": f'MediaBrowser Token="{api_key}"',
+    }
+
+
+def build_json_headers(extra_headers: dict[str, str] | None = None) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    return headers
+
+
+def parse_json_response(response) -> dict:
+    payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise JellyfinApiError("Expected JSON object response from Jellyfin API")
+    return payload
+
+
+def normalize_base_url(base_url: str) -> str:
+    return base_url.rstrip("/")
+
+
+class JellyfinClient:
+    def __init__(self, config: SmokeConfig):
+        self._config = config
+        self._base_url = normalize_base_url(config.jellyfin_base_url or "")
+
+    def get_public_system_info(self) -> dict:
+        return self._request_json("GET", "/System/Info/Public")
+
+    def authenticate(self) -> str:
+        if self._config.jellyfin_api_key:
+            return self._config.jellyfin_api_key
+        return self.authenticate_with_password()
+
+    def authenticate_with_password(self) -> str:
+        payload = self._request_json(
+            "POST",
+            "/Users/AuthenticateByName",
+            body={
+                "Username": self._config.jellyfin_username,
+                "Pw": self._config.jellyfin_password,
+            },
+        )
+        token = payload.get("AccessToken")
+        if not token:
+            raise JellyfinApiError("Jellyfin login response did not include AccessToken")
+        return token
+
+    def get_authenticated_headers(self) -> dict[str, str]:
+        return build_api_key_headers(self.authenticate())
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict:
+        request = self._build_request(method, path, body=body, headers=headers)
+        try:
+            with urlopen(request) as response:
+                return parse_json_response(response)
+        except HTTPError as exc:
+            raise JellyfinApiError(
+                f"Jellyfin API request failed with status {exc.code}: {exc.reason}"
+            ) from exc
+
+    def _build_request(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Request:
+        request_headers = build_json_headers(headers)
+        payload = None
+        if body is not None:
+            request_headers["Content-Type"] = "application/json"
+            payload = json.dumps(body).encode("utf-8")
+
+        return Request(
+            url=self._base_url + path,
+            data=payload,
+            headers=request_headers,
+            method=method,
+        )
 
 
 def list_video_candidates(base_dir: Path) -> list[Path]:
