@@ -1,0 +1,19 @@
+[
+  {
+    "guid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "Smart Branching",
+    "overview": "Context-aware playback with mature content filtering for Jellyfin",
+    "description": "A Jellyfin plugin that provides age- and profile-aware video playback. Python pre-processing generates content manifests, and the C# plugin serves profile-filtered streams directly through Jellyfin.",
+    "owner": "vid_splitter",
+    "category": "General",
+    "versions": [
+      {
+        "version": "0.1.0.0",
+        "targetAbi": "10.9.0.0",
+        "sourceUrl": "https://example.invalid/jellyfin-plugin-smart-branching-0.1.0.0.zip",
+        "checksum": "00000000000000000000000000000000",
+        "timestamp": "2026-06-15T00:00:00Z"
+      }
+    ]
+  }
+]
