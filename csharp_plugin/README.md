@@ -115,6 +115,17 @@ dotnet build SmartBranching.Plugin.sln
 dotnet test SmartBranching.Plugin.sln
 ```
 
+### Optional Real-Media Smoke Checks
+
+Run the heavyweight Python integration smoke only when local media fixtures and
+FFmpeg tooling are available. Keep it gated in CI and local verification with
+`RUN_REAL_ANALYZER_TESTS=1`.
+
+```bash
+cd ..
+RUN_REAL_ANALYZER_TESTS=1 env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_real_video_integration.py -rs
+```
+
 ### Enable Plugin Logging
 
 Add to Jellyfin's `logging.json`:

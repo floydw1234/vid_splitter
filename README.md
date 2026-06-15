@@ -67,3 +67,12 @@ User JSON supports:
 ```bash
 env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_bvf_muxer.py tools/test_bvf_player.py tests/test_cli_e2e.py
 ```
+
+For Jellyfin plugin build/test commands, see `csharp_plugin/README.md`.
+
+Optional real-media smoke checks are intentionally gated because they require
+local media fixtures plus `ffmpeg` / `ffprobe`:
+
+```bash
+RUN_REAL_ANALYZER_TESTS=1 env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_real_video_integration.py -rs
+```
