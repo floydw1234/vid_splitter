@@ -74,6 +74,10 @@ def _deploy_script_path() -> Path:
     return _repo_root() / "csharp_plugin" / "scripts" / "deploy_vivo.py"
 
 
+def _release_workflow_path() -> Path:
+    return _repo_root() / ".github" / "workflows" / "release.yml"
+
+
 def _write_fake_build_output(build_dir: Path, *, include_zstd: bool = True) -> None:
     build_dir.mkdir(parents=True, exist_ok=True)
     (build_dir / "Jellyfin.Plugin.SmartBranching.dll").write_bytes(b"fake-plugin-dll")
@@ -352,3 +356,21 @@ def test_deploy_helper_fails_clearly_when_target_directory_is_missing():
         assert "target" in combined_output.lower()
         assert "directory" in combined_output.lower()
         assert "missing" in combined_output.lower() or "not found" in combined_output.lower()
+
+
+def test_release_workflow_exists():
+    workflow_path = _release_workflow_path()
+
+    assert workflow_path.exists(), "Expected .github/workflows/release.yml to exist."
+
+
+def test_release_workflow_contains_build_test_package_and_release_steps():
+    workflow_path = _release_workflow_path()
+    contents = workflow_path.read_text(encoding="utf-8")
+    lowered = contents.lower()
+
+    assert "dotnet build" in lowered
+    assert "dotnet test" in lowered
+    assert "package_plugin.py" in contents
+    assert "manifest.json" in contents
+    assert "upload" in lowered or "release" in lowered
