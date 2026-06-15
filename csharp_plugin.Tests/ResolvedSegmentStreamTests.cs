@@ -138,6 +138,73 @@ public class ResolvedSegmentStreamTests
         Assert.Equal("AAA", Encoding.UTF8.GetString(buffer, 0, bytesRead));
     }
 
+    [Fact]
+    public void Seek_ToLastByteOfSegment_ThenRead_CrossesIntoNextSegment()
+    {
+        using var bvfFile = CreateTempBvf(
+            ("seg-a", "AAAA"),
+            ("seg-b", "BBBBB"),
+            ("seg-c", "CC"));
+        var resolvedSegments = CreateResolvedSegments(bvfFile, "seg-a", "seg-b", "seg-c");
+
+        using var stream = new ResolvedSegmentStream(
+            bvfFile,
+            resolvedSegments);
+
+        var newPosition = stream.Seek(3, SeekOrigin.Begin);
+        var buffer = new byte[3];
+        var bytesRead = stream.Read(buffer, 0, buffer.Length);
+
+        Assert.Equal(3, newPosition);
+        Assert.Equal(6, stream.Position);
+        Assert.Equal(3, bytesRead);
+        Assert.Equal("ABB", Encoding.UTF8.GetString(buffer, 0, bytesRead));
+    }
+
+    [Fact]
+    public void Seek_ToStartOfLaterSegment_ThenReadToEnd_ReturnsRemainingSuffixToEof()
+    {
+        using var bvfFile = CreateTempBvf(
+            ("seg-a", "AAAA"),
+            ("seg-b", "BBBBB"),
+            ("seg-c", "CC"));
+        var resolvedSegments = CreateResolvedSegments(bvfFile, "seg-a", "seg-b", "seg-c");
+
+        using var stream = new ResolvedSegmentStream(
+            bvfFile,
+            resolvedSegments);
+
+        var newPosition = stream.Seek(9, SeekOrigin.Begin);
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+
+        Assert.Equal(9, newPosition);
+        Assert.Equal(11, stream.Position);
+        Assert.Equal("CC", Encoding.UTF8.GetString(buffer.ToArray()));
+    }
+
+    [Fact]
+    public void Seek_ToStreamLength_NextReadReturnsZero()
+    {
+        using var bvfFile = CreateTempBvf(
+            ("seg-a", "AAAA"),
+            ("seg-b", "BBBBB"),
+            ("seg-c", "CC"));
+        var resolvedSegments = CreateResolvedSegments(bvfFile, "seg-a", "seg-b", "seg-c");
+
+        using var stream = new ResolvedSegmentStream(
+            bvfFile,
+            resolvedSegments);
+
+        var eofPosition = stream.Seek(stream.Length, SeekOrigin.Begin);
+        var buffer = new byte[4];
+        var bytesRead = stream.Read(buffer, 0, buffer.Length);
+
+        Assert.Equal(11, eofPosition);
+        Assert.Equal(11, stream.Position);
+        Assert.Equal(0, bytesRead);
+    }
+
     private static List<ResolvedSegment> CreateResolvedSegments(string bvfPath, params string[] segmentIds)
     {
         var index = BVFReader.GetSegments(bvfPath).ToDictionary(segment => segment.segmentId, StringComparer.Ordinal);
