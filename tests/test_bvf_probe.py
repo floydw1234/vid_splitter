@@ -110,6 +110,12 @@ def _rewrite_index_entry(path: Path, entry_index: int, *, data_offset: int | Non
     path.write_bytes(bytes(raw))
 
 
+def _rewrite_header_segment_count(path: Path, segment_count: int) -> None:
+    raw = bytearray(path.read_bytes())
+    struct.pack_into("<I", raw, 48, segment_count)
+    path.write_bytes(bytes(raw))
+
+
 def test_probe_script_header_mentions_diagnostics_purpose():
     probe_script = ROOT / "tools" / "bvf_probe.py"
 
@@ -249,4 +255,100 @@ def test_probe_rejects_non_probeable_media_payloads(tmp_path: Path):
 
     assert result.returncode != 0
     assert "ffprobe" in result.stdout
+    assert "seg_001" in result.stdout
+
+
+def test_probe_rejects_header_segment_count_mismatch(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    _rewrite_header_segment_count(bvf, 3)
+
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "segment_count" in result.stdout
+    assert "header" in result.stdout
+    assert "index" in result.stdout
+
+
+def test_probe_rejects_manifest_segment_count_mismatch(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    def transform(manifest: dict) -> None:
+        manifest["segments"].append(
+            {
+                "id": "ghost_001",
+                "start_ms": 4000,
+                "end_ms": 5000,
+                "tags": [],
+                "risk": "safe",
+                "media": {
+                    "asset_id": "ghost_001",
+                    "container": "fmp4",
+                    "mime_type": "video/mp4",
+                    "codec_video": 1,
+                    "codec_audio": 256,
+                },
+                "profiles": {
+                    "child": {"action": "play", "segment_id": "ghost_001"},
+                    "adult": {"action": "play", "segment_id": "ghost_001"},
+                },
+            }
+        )
+
+    _rewrite_manifest(bvf, transform)
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "manifest" in result.stdout
+    assert "segments" in result.stdout
+    assert "index" in result.stdout
+
+
+def test_probe_rejects_index_segment_id_missing_from_manifest_media(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+
+    def transform(manifest: dict) -> None:
+        manifest["segments"][0]["media"]["asset_id"] = "renamed_001"
+
+    _rewrite_manifest(bvf, transform)
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "seg_001" in result.stdout
+    assert "manifest" in result.stdout
+    assert "asset" in result.stdout
+
+
+def test_probe_rejects_index_data_length_outside_the_file(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    file_size = bvf.stat().st_size
+    parsed = BvfMuxer.read_bvf(bvf)
+    entry = parsed["segments"][0]
+    _rewrite_index_entry(
+        bvf,
+        0,
+        data_length=(file_size - entry["data_offset"]) + 4096,
+    )
+
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "data_length" in result.stdout
+    assert "outside the file" in result.stdout
+
+
+def test_probe_rejects_asset_block_segment_id_mismatch(tmp_path: Path):
+    bvf = _write_fixture(tmp_path)
+    parsed = BvfMuxer.read_bvf(bvf)
+    first_offset = parsed["segments"][0]["data_offset"]
+
+    raw = bytearray(bvf.read_bytes())
+    raw[first_offset + 4 : first_offset + 20] = b"wrong_seg_id\x00\x00\x00\x00"
+    bvf.write_bytes(bytes(raw))
+
+    result = _run_probe(bvf, "--profile", "child")
+
+    assert result.returncode != 0
+    assert "segment_id" in result.stdout
+    assert "asset block" in result.stdout
     assert "seg_001" in result.stdout
