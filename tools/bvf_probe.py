@@ -222,6 +222,68 @@ def _probe_media_assets(parsed: dict[str, Any]) -> tuple[list[dict[str, Any]], l
             has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
             duration_seconds = float(format_info.get("duration", 0.0) or 0.0)
             expected_duration_seconds = int(entry.get("duration_ms", 0)) / 1000
+            duration_matches = (
+                abs(duration_seconds - expected_duration_seconds)
+                <= MEDIA_DURATION_TOLERANCE_SECONDS
+            )
+            keyframe_aligned = False
+
+            if has_video:
+                packet_result = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-print_format",
+                        "json",
+                        "-select_streams",
+                        "v:0",
+                        "-show_packets",
+                        "-read_intervals",
+                        "%+#1",
+                        "-show_entries",
+                        "packet=flags",
+                        str(asset_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                packet_probe = json.loads(packet_result.stdout)
+                first_packet = (packet_probe.get("packets") or [{}])[0]
+                packet_flags = str(first_packet.get("flags", "") or "")
+                packet_is_keyframe = "K" in packet_flags
+
+                frame_result = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-print_format",
+                        "json",
+                        "-select_streams",
+                        "v:0",
+                        "-show_frames",
+                        "-read_intervals",
+                        "%+#1",
+                        "-show_entries",
+                        "frame=key_frame,pict_type",
+                        str(asset_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                frame_probe = json.loads(frame_result.stdout)
+                first_frame = (frame_probe.get("frames") or [{}])[0]
+                keyframe_aligned = int(first_frame.get("key_frame", 0) or 0) == 1
+                pict_type = str(first_frame.get("pict_type", "") or "").upper()
+                if not packet_is_keyframe:
+                    keyframe_aligned = False
+                if pict_type and pict_type != "I":
+                    keyframe_aligned = False
+                if not duration_matches:
+                    keyframe_aligned = False
 
             media_assets.append(
                 {
@@ -229,13 +291,16 @@ def _probe_media_assets(parsed: dict[str, Any]) -> tuple[list[dict[str, Any]], l
                     "container": "fmp4",
                     "has_video": has_video,
                     "has_audio": has_audio,
+                    "keyframe_aligned": keyframe_aligned,
                 }
             )
 
             if not has_video:
                 issues.append(f"Asset {segment_id} is missing a video stream.")
+            elif not keyframe_aligned:
+                issues.append(f"Asset {segment_id} does not start on a keyframe.")
 
-            if abs(duration_seconds - expected_duration_seconds) > MEDIA_DURATION_TOLERANCE_SECONDS:
+            if not duration_matches:
                 issues.append(
                     f"Asset {segment_id} duration mismatch: probed={duration_seconds:.3f}s expected={expected_duration_seconds:.3f}s "
                     f"(index duration_ms={entry.get('duration_ms', 0)})."
@@ -410,6 +475,11 @@ def _build_result_payload(
         "probeable_assets": 0,
         "duration_mismatches": 0,
     }
+    keyframe_summary = {
+        "checked_assets": 0,
+        "keyframe_aligned_assets": 0,
+        "misaligned_assets": 0,
+    }
     resolved_profile: str | None = profile
     resolved_segments: list[dict[str, str]] = []
     export_summary: dict[str, Any] | None = None
@@ -430,6 +500,13 @@ def _build_result_payload(
             media_summary["duration_mismatches"] = sum(
                 1 for issue in issues if "duration mismatch" in issue.lower()
             )
+            keyframe_summary["checked_assets"] = len(media_assets)
+            keyframe_summary["keyframe_aligned_assets"] = sum(
+                1 for asset in media_assets if asset.get("keyframe_aligned") is True
+            )
+            keyframe_summary["misaligned_assets"] = sum(
+                1 for asset in media_assets if asset.get("keyframe_aligned") is False
+            )
         resolved_profile = parsed.get("resolved_profile", resolved_profile)
         if isinstance(parsed.get("resolved_segments"), list):
             resolved_segments = parsed["resolved_segments"]
@@ -438,6 +515,7 @@ def _build_result_payload(
 
     return {
         "export_summary": export_summary,
+        "keyframe_summary": keyframe_summary,
         "media_assets": media_assets,
         "media_summary": media_summary,
         "path": str(path),
