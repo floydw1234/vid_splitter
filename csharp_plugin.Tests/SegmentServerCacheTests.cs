@@ -1,10 +1,8 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using Jellyfin.Plugin.SmartBranching;
-using MediaBrowser.Common.Configuration;
-using Microsoft.Extensions.Logging.Abstractions;
+using Jellyfin.Plugin.SmartBranching.Models;
 using Xunit;
 using ZstdSharp;
 
@@ -13,66 +11,89 @@ namespace Jellyfin.Plugin.SmartBranching.Tests;
 public class SegmentServerCacheTests
 {
     [Fact]
-    public void GetManifestRaw_CachesManifestOnFirstRead()
+    public void GetOrLoad_CachesManifestOnFirstRead()
     {
         using var bvfFile = CreateTempBvf(
             movieId: "movie-1",
             title: "Original",
             profileName: "adult");
-        var server = CreateServer();
+        var cache = new BvfManifestCache();
+        var loadCount = 0;
 
-        var first = server.GetManifestRaw(bvfFile);
-        var second = server.GetManifestRaw(bvfFile);
+        var first = cache.GetOrLoad(bvfFile, path =>
+        {
+            loadCount++;
+            return BVFReader.LoadBvfManifest(path);
+        });
+        var second = cache.GetOrLoad(bvfFile, path =>
+        {
+            loadCount++;
+            return BVFReader.LoadBvfManifest(path);
+        });
 
         Assert.Same(first, second);
+        Assert.Equal(1, loadCount);
         Assert.Equal("movie-1", second.MovieId);
     }
 
     [Fact]
-    public void GetManifestRaw_RewrittenBvfFile_InvalidatesCacheAndReloadsManifest()
+    public void GetOrLoad_RewrittenBvfFile_InvalidatesCacheAndReloadsManifest()
     {
         using var bvfFile = CreateTempBvf(
             movieId: "movie-1",
             title: "Original",
             profileName: "adult");
-        var server = CreateServer();
+        var cache = new BvfManifestCache();
+        var loadCount = 0;
 
-        var first = server.GetManifestRaw(bvfFile);
+        var first = cache.GetOrLoad(bvfFile, path =>
+        {
+            loadCount++;
+            return BVFReader.LoadBvfManifest(path);
+        });
         RewriteManifest(
             bvfFile,
             movieId: "movie-2",
             title: "Updated",
             profileName: "child");
 
-        var second = server.GetManifestRaw(bvfFile);
+        var second = cache.GetOrLoad(bvfFile, path =>
+        {
+            loadCount++;
+            return BVFReader.LoadBvfManifest(path);
+        });
 
         Assert.NotSame(first, second);
+        Assert.Equal(2, loadCount);
         Assert.Equal("movie-2", second.MovieId);
         Assert.Contains("child", second.Profiles.Keys);
     }
 
     [Fact]
-    public void ClearCache_RemovesCachedEntries()
+    public void Clear_RemovesCachedEntries()
     {
         using var bvfFile = CreateTempBvf(
             movieId: "movie-1",
             title: "Original",
             profileName: "adult");
-        var server = CreateServer();
+        var cache = new BvfManifestCache();
+        var loadCount = 0;
 
-        var first = server.GetManifestRaw(bvfFile);
-        server.ClearCache();
-        var second = server.GetManifestRaw(bvfFile);
+        var first = cache.GetOrLoad(bvfFile, path =>
+        {
+            loadCount++;
+            return BVFReader.LoadBvfManifest(path);
+        });
+        cache.Clear();
+        var second = cache.GetOrLoad(bvfFile, path =>
+        {
+            loadCount++;
+            return BVFReader.LoadBvfManifest(path);
+        });
 
         Assert.NotSame(first, second);
+        Assert.Equal(2, loadCount);
         Assert.Equal("movie-1", second.MovieId);
-    }
-
-    private static SegmentServer CreateServer()
-    {
-        return new SegmentServer(
-            NullLogger<SegmentServer>.Instance,
-            new TestApplicationPaths());
     }
 
     private static TempFile CreateTempBvf(string movieId, string title, string profileName)
@@ -150,29 +171,5 @@ public class SegmentServerCacheTests
             if (File.Exists(_path))
                 File.Delete(_path);
         }
-    }
-
-    private sealed class TestApplicationPaths : IApplicationPaths
-    {
-        private readonly string _root = Path.Combine(Path.GetTempPath(), "smartbranching-tests", Guid.NewGuid().ToString("N"));
-
-        public TestApplicationPaths()
-        {
-            Directory.CreateDirectory(_root);
-        }
-
-        public string ProgramDataPath => _root;
-        public string WebPath => _root;
-        public string ProgramSystemPath => _root;
-        public string DataPath => _root;
-        public string ImageCachePath => _root;
-        public string PluginsPath => _root;
-        public string PluginConfigurationsPath => _root;
-        public string LogDirectoryPath => _root;
-        public string ConfigurationDirectoryPath => _root;
-        public string SystemConfigurationFilePath => Path.Combine(_root, "system.xml");
-        public string CachePath => _root;
-        public string TempDirectory => _root;
-        public string VirtualDataPath => _root;
     }
 }

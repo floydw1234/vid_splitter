@@ -38,7 +38,7 @@ public class SegmentServer : IMediaSourceProvider
 
     private readonly ILogger<SegmentServer> _logger;
     private readonly ProfileResolver _profileResolver;
-    private readonly Dictionary<string, BranchManifest> _bvfManifestCache = new();
+    private readonly BvfManifestCache _bvfManifestCache = new();
 
     public SegmentServer(
         ILogger<SegmentServer> logger,
@@ -54,14 +54,9 @@ public class SegmentServer : IMediaSourceProvider
     /// </summary>
     private BranchManifest GetBvfManifest(string bvfPath)
     {
-        if (_bvfManifestCache.TryGetValue(bvfPath, out var cached))
-            return cached;
-
         try
         {
-            var manifest = BVFReader.LoadBvfManifest(bvfPath);
-            _bvfManifestCache[bvfPath] = manifest;
-            return manifest;
+            return _bvfManifestCache.GetOrLoad(bvfPath, path => BVFReader.LoadBvfManifest(path));
         }
         catch (Exception ex)
         {
