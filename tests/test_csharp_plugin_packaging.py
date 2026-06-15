@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import hashlib
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -59,6 +60,12 @@ def _find_manifest_path() -> Path | None:
     return None
 
 
+def _read_manifest() -> list[dict[str, object]]:
+    manifest_path = _find_manifest_path()
+    assert manifest_path is not None, "Expected manifest.json to exist."
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
 def _package_script_path() -> Path:
     return _repo_root() / "csharp_plugin" / "scripts" / "package_plugin.py"
 
@@ -107,14 +114,7 @@ def test_plugin_metadata_declares_required_runtime_artifacts():
 
 
 def test_repository_manifest_is_present_and_complete_if_checked_in():
-    manifest_path = _find_manifest_path()
-
-    assert manifest_path is not None, (
-        "Expected a repository manifest at repo root or csharp_plugin/manifest.json "
-        "for a reproducible plugin package/install workflow."
-    )
-
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = _read_manifest()
     assert isinstance(manifest, list)
     assert manifest
 
@@ -182,3 +182,35 @@ def test_package_command_fails_when_metadata_versions_do_not_match():
     combined_output = f"{result.stdout}\n{result.stderr}"
     assert "version" in combined_output.lower()
     assert "mismatch" in combined_output.lower()
+
+
+def test_repository_manifest_version_entry_aligns_with_build_yaml():
+    build_yaml = _read_build_yaml()
+    manifest = _read_manifest()
+
+    plugin = manifest[0]
+    latest = plugin["versions"][0]
+
+    assert latest["version"] == build_yaml["version"]
+    assert latest["targetAbi"] == build_yaml["targetAbi"]
+
+
+def test_repository_manifest_checksum_matches_packaged_zip_sha256():
+    manifest = _read_manifest()
+    latest = manifest[0]["versions"][0]
+
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        build_dir = tmp_path / "build-output"
+        output_dir = tmp_path / "dist"
+        _write_fake_build_output(build_dir)
+
+        result = _run_package_command(build_dir, output_dir)
+        assert result.returncode == 0, result.stderr or result.stdout
+
+        zip_files = list(output_dir.glob("*.zip"))
+        assert len(zip_files) == 1
+        zip_bytes = zip_files[0].read_bytes()
+        expected_checksum = hashlib.sha256(zip_bytes).hexdigest()
+
+    assert latest["checksum"] == expected_checksum
