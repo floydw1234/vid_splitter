@@ -205,6 +205,80 @@ public class ResolvedSegmentStreamTests
         Assert.Equal(0, bytesRead);
     }
 
+    [Fact]
+    public void Seek_NegativeFromBeginning_Throws()
+    {
+        using var bvfFile = CreateTempBvf(
+            ("seg-a", "AAAA"),
+            ("seg-b", "BBBBB"),
+            ("seg-c", "CC"));
+        var resolvedSegments = CreateResolvedSegments(bvfFile, "seg-a", "seg-b", "seg-c");
+
+        using var stream = new ResolvedSegmentStream(
+            bvfFile,
+            resolvedSegments);
+
+        Assert.ThrowsAny<IOException>(() => stream.Seek(-1, SeekOrigin.Begin));
+    }
+
+    [Fact]
+    public void Seek_BeyondLength_CapsAtLength_AndNextReadReturnsZero()
+    {
+        using var bvfFile = CreateTempBvf(
+            ("seg-a", "AAAA"),
+            ("seg-b", "BBBBB"),
+            ("seg-c", "CC"));
+        var resolvedSegments = CreateResolvedSegments(bvfFile, "seg-a", "seg-b", "seg-c");
+
+        using var stream = new ResolvedSegmentStream(
+            bvfFile,
+            resolvedSegments);
+
+        var newPosition = stream.Seek(100, SeekOrigin.Begin);
+        var buffer = new byte[4];
+        var bytesRead = stream.Read(buffer, 0, buffer.Length);
+
+        Assert.Equal(stream.Length, newPosition);
+        Assert.Equal(stream.Length, stream.Position);
+        Assert.Equal(0, bytesRead);
+    }
+
+    [Fact]
+    public void Read_AfterDispose_ThrowsObjectDisposedException()
+    {
+        using var bvfFile = CreateTempBvf(
+            ("seg-a", "AAAA"),
+            ("seg-b", "BBBBB"),
+            ("seg-c", "CC"));
+        var resolvedSegments = CreateResolvedSegments(bvfFile, "seg-a", "seg-b", "seg-c");
+
+        var stream = new ResolvedSegmentStream(
+            bvfFile,
+            resolvedSegments);
+        stream.Dispose();
+
+        var buffer = new byte[1];
+
+        Assert.Throws<ObjectDisposedException>(() => stream.Read(buffer, 0, buffer.Length));
+    }
+
+    [Fact]
+    public void Seek_AfterDispose_ThrowsObjectDisposedException()
+    {
+        using var bvfFile = CreateTempBvf(
+            ("seg-a", "AAAA"),
+            ("seg-b", "BBBBB"),
+            ("seg-c", "CC"));
+        var resolvedSegments = CreateResolvedSegments(bvfFile, "seg-a", "seg-b", "seg-c");
+
+        var stream = new ResolvedSegmentStream(
+            bvfFile,
+            resolvedSegments);
+        stream.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => stream.Seek(0, SeekOrigin.Begin));
+    }
+
     private static List<ResolvedSegment> CreateResolvedSegments(string bvfPath, params string[] segmentIds)
     {
         var index = BVFReader.GetSegments(bvfPath).ToDictionary(segment => segment.segmentId, StringComparer.Ordinal);
