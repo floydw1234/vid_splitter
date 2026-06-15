@@ -70,6 +70,10 @@ def _package_script_path() -> Path:
     return _repo_root() / "csharp_plugin" / "scripts" / "package_plugin.py"
 
 
+def _deploy_script_path() -> Path:
+    return _repo_root() / "csharp_plugin" / "scripts" / "deploy_vivo.py"
+
+
 def _write_fake_build_output(build_dir: Path, *, include_zstd: bool = True) -> None:
     build_dir.mkdir(parents=True, exist_ok=True)
     (build_dir / "Jellyfin.Plugin.SmartBranching.dll").write_bytes(b"fake-plugin-dll")
@@ -91,6 +95,30 @@ def _run_package_command(build_dir: Path, output_dir: Path) -> subprocess.Comple
             "--output-dir",
             str(output_dir),
         ],
+        capture_output=True,
+        text=True,
+        cwd=_repo_root(),
+    )
+
+
+def _run_deploy_command(
+    zip_path: Path,
+    target_dir: Path,
+    *,
+    clean: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        str(_deploy_script_path()),
+        "--package-zip",
+        str(zip_path),
+        "--target-dir",
+        str(target_dir),
+    ]
+    if clean:
+        command.append("--clean")
+    return subprocess.run(
+        command,
         capture_output=True,
         text=True,
         cwd=_repo_root(),
@@ -214,3 +242,113 @@ def test_repository_manifest_checksum_matches_packaged_zip_sha256():
         expected_checksum = hashlib.sha256(zip_bytes).hexdigest()
 
     assert latest["checksum"] == expected_checksum
+
+
+def test_deploy_helper_extracts_packaged_zip_into_target_directory():
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        build_dir = tmp_path / "build-output"
+        output_dir = tmp_path / "dist"
+        target_dir = tmp_path / "plugins" / "SmartBranching"
+        target_dir.mkdir(parents=True)
+        _write_fake_build_output(build_dir)
+
+        package_result = _run_package_command(build_dir, output_dir)
+        assert package_result.returncode == 0, package_result.stderr or package_result.stdout
+
+        zip_files = list(output_dir.glob("*.zip"))
+        assert len(zip_files) == 1
+
+        deploy_result = _run_deploy_command(zip_files[0], target_dir)
+
+        assert deploy_result.returncode == 0, deploy_result.stderr or deploy_result.stdout
+        assert (target_dir / "Jellyfin.Plugin.SmartBranching.dll").exists()
+        assert (target_dir / "Jellyfin.Plugin.SmartBranching.deps.json").exists()
+        assert (target_dir / "ZstdSharp.dll").exists()
+
+
+def test_deploy_helper_can_clear_old_plugin_files_before_install():
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        build_dir = tmp_path / "build-output"
+        output_dir = tmp_path / "dist"
+        target_dir = tmp_path / "plugins" / "SmartBranching"
+        target_dir.mkdir(parents=True)
+        _write_fake_build_output(build_dir)
+        (target_dir / "old-plugin.dll").write_bytes(b"stale")
+
+        package_result = _run_package_command(build_dir, output_dir)
+        assert package_result.returncode == 0, package_result.stderr or package_result.stdout
+
+        zip_files = list(output_dir.glob("*.zip"))
+        assert len(zip_files) == 1
+
+        deploy_result = _run_deploy_command(zip_files[0], target_dir, clean=True)
+
+        assert deploy_result.returncode == 0, deploy_result.stderr or deploy_result.stdout
+        assert not (target_dir / "old-plugin.dll").exists()
+        assert (target_dir / "Jellyfin.Plugin.SmartBranching.dll").exists()
+
+
+def test_deploy_helper_does_not_touch_unrelated_directories_when_cleaning():
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        build_dir = tmp_path / "build-output"
+        output_dir = tmp_path / "dist"
+        plugins_root = tmp_path / "plugins"
+        target_dir = plugins_root / "SmartBranching"
+        unrelated_dir = plugins_root / "OtherPlugin"
+        target_dir.mkdir(parents=True)
+        unrelated_dir.mkdir(parents=True)
+        _write_fake_build_output(build_dir)
+        (target_dir / "old-plugin.dll").write_bytes(b"stale")
+        (unrelated_dir / "keep-me.txt").write_text("unchanged", encoding="utf-8")
+
+        package_result = _run_package_command(build_dir, output_dir)
+        assert package_result.returncode == 0, package_result.stderr or package_result.stdout
+
+        zip_files = list(output_dir.glob("*.zip"))
+        assert len(zip_files) == 1
+
+        deploy_result = _run_deploy_command(zip_files[0], target_dir, clean=True)
+
+        assert deploy_result.returncode == 0, deploy_result.stderr or deploy_result.stdout
+        assert (unrelated_dir / "keep-me.txt").read_text(encoding="utf-8") == "unchanged"
+
+
+def test_deploy_helper_fails_clearly_when_zip_file_is_missing():
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        missing_zip = tmp_path / "missing.zip"
+        target_dir = tmp_path / "plugins" / "SmartBranching"
+        target_dir.mkdir(parents=True)
+
+        result = _run_deploy_command(missing_zip, target_dir)
+
+        assert result.returncode != 0
+        combined_output = f"{result.stdout}\n{result.stderr}"
+        assert "zip" in combined_output.lower()
+        assert "missing" in combined_output.lower() or "not found" in combined_output.lower()
+
+
+def test_deploy_helper_fails_clearly_when_target_directory_is_missing():
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        build_dir = tmp_path / "build-output"
+        output_dir = tmp_path / "dist"
+        missing_target_dir = tmp_path / "plugins" / "SmartBranching"
+        _write_fake_build_output(build_dir)
+
+        package_result = _run_package_command(build_dir, output_dir)
+        assert package_result.returncode == 0, package_result.stderr or package_result.stdout
+
+        zip_files = list(output_dir.glob("*.zip"))
+        assert len(zip_files) == 1
+
+        result = _run_deploy_command(zip_files[0], missing_target_dir)
+
+        assert result.returncode != 0
+        combined_output = f"{result.stdout}\n{result.stderr}"
+        assert "target" in combined_output.lower()
+        assert "directory" in combined_output.lower()
+        assert "missing" in combined_output.lower() or "not found" in combined_output.lower()
