@@ -1,31 +1,31 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <meta charset="utf-8" />
-    <title>Smart Branching Configuration</title>
+    <meta charset="utf-8">
+    <title>Smart Branching</title>
 </head>
 <body>
-    <div id="mainContent">
-        <h1>Smart Branching</h1>
-        <p>Configure how mature content is handled for different user profiles.</p>
+    <div id="smartBranchingConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="smartBranchingConfigForm">
+                    <div class="verticalSection verticalSection-extrabottompadding">
+                        <h3 class="headingKey cardHeading">Smart Branching</h3>
+                        <p>Configure how mature content is handled for different user profiles.</p>
+                    </div>
 
-        <form class="formPopup">
-            <div class="blockContent">
-                <div class="verticalSection verticalSection-extrabottompadding">
-                    <h3 class="headingKey cardHeading">General Settings</h3>
-                    <div class="editorFieldSet">
+                    <div class="verticalSection verticalSection-extrabottompadding">
+                        <h3 class="headingKey cardHeading">General Settings</h3>
                         <div class="inputContainer">
-                            <label class="inputLabel inputLabelUnfocused" for="enableSmartBranching">
-                                Enable Smart Branching
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" id="enableSmartBranching" type="checkbox" />
+                                <span>Enable Smart Branching</span>
                             </label>
-                            <input is="emby-checkbox" id="enableSmartBranching" type="checkbox" />
                         </div>
 
-                        <div class="inputContainer">
-                            <label class="inputLabel" for="defaultProfile">
-                                Default Profile (unknown users)
-                            </label>
-                            <select is="emby-select" id="defaultProfile" class="emby-select-withcolor emby-select">
+                        <div class="selectContainer">
+                            <label class="selectLabel" for="defaultProfile">Default Profile (unknown users)</label>
+                            <select is="emby-select" id="defaultProfile" name="defaultProfile" class="emby-select-withcolor emby-select">
                                 <option value="child">Child (Age 10)</option>
                                 <option value="teen_m">Teen Male (Age 15)</option>
                                 <option value="teen_f">Teen Female (Age 15)</option>
@@ -34,31 +34,20 @@
                         </div>
 
                         <div class="inputContainer">
-                            <label class="inputLabel" for="nsfwThreshold">
-                                NSFW Confidence Threshold
-                            </label>
-                            <input is="emby-input" id="nsfwThreshold" type="number" min="0" max="1" step="0.1" value="0.6" />
+                            <label class="inputLabel inputLabelUnfocused" for="nsfwThreshold">NSFW Confidence Threshold</label>
+                            <input is="emby-input" id="nsfwThreshold" name="nsfwThreshold" type="number" min="0" max="1" step="0.1" value="0.6" />
                             <div class="fieldDescription">Minimum confidence to flag a frame as NSFW</div>
                         </div>
-                    </div>
-                </div>
 
-                <div class="verticalSection verticalSection-extrabottompadding">
-                    <h3 class="headingKey cardHeading">Filler Settings</h3>
-                    <div class="editorFieldSet">
                         <div class="inputContainer">
-                            <label class="inputLabel" for="fillerDirectory">
-                                Filler Video Directory
-                            </label>
-                            <input is="emby-input" id="fillerDirectory" type="text" value="smart_branching/filler" />
+                            <label class="inputLabel inputLabelUnfocused" for="fillerDirectory">Filler Video Directory</label>
+                            <input is="emby-input" id="fillerDirectory" name="fillerDirectory" type="text" value="smart_branching/filler" />
                             <div class="fieldDescription">Directory containing fMP4/CMAF filler assets for swapping mature content</div>
                         </div>
 
-                        <div class="inputContainer">
-                            <label class="inputLabel" for="defaultAction">
-                                Default Mature Content Action
-                            </label>
-                            <select is="emby-select" id="defaultAction" class="emby-select-withcolor emby-select">
+                        <div class="selectContainer">
+                            <label class="selectLabel" for="defaultAction">Default Mature Content Action</label>
+                            <select is="emby-select" id="defaultAction" name="defaultAction" class="emby-select-withcolor emby-select">
                                 <option value="swap">Swap with filler</option>
                                 <option value="skip">Skip segment</option>
                                 <option value="blur">Blur (future)</option>
@@ -66,178 +55,311 @@
                             </select>
                         </div>
                     </div>
-                </div>
 
-                <div class="verticalSection verticalSection-extrabottompadding">
-                    <h3 class="headingKey cardHeading">User Profiles</h3>
-                    <div class="editorFieldSet">
-                        <p>
-                            Set each user's birthday and sex so the plugin can automatically resolve
-                            the correct content profile. Optionally override the resolved profile directly.
-                        </p>
-                        <table class="tblApiKeys detailTable" style="width:100%">
-                            <thead>
-                                <tr>
-                                    <th>User</th>
-                                    <th>Birthday</th>
-                                    <th>Sex</th>
-                                    <th>Override</th>
-                                    <th>Resolved Profile</th>
-                                </tr>
-                            </thead>
-                            <tbody id="userProfileTableBody">
-                                <tr>
-                                    <td colspan="5" style="text-align:center; padding: 1em;">
-                                        Loading users...
-                                    </td>
-                                </tr>
-                            </tbody>
-                        </table>
+                    <div class="verticalSection verticalSection-extrabottompadding">
+                        <h3 class="headingKey cardHeading">User Profiles</h3>
+                        <div class="editorFieldSet">
+                            <p>
+                                Set each user&rsquo;s birthday and sex so the plugin can automatically resolve
+                                the correct content profile. Optionally override the resolved profile directly.
+                            </p>
+                            <table class="tblApiKeys detailTable" id="userProfilesTable" style="width:100%">
+                                <thead>
+                                    <tr>
+                                        <th>User</th>
+                                        <th>Birthday</th>
+                                        <th>Sex</th>
+                                        <th>Override</th>
+                                        <th>Resolved Profile</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="userProfileTableBody">
+                                    <tr>
+                                        <td colspan="5" style="text-align:center; padding: 1em;">
+                                            Loading users...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                </div>
-            </div>
 
-            <button is="emby-button" type="submit" class="raised button-submit block btnSave raisedIcon">
-                <span>Save</span>
-                <span class="buttonText button-icon-left icon-save material-icons save" style="color: white;"></span>
-            </button>
-        </form>
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
     </div>
 
     <script type="text/javascript">
-        (function () {
-            'use strict';
+        var SmartBranchingConfig = {
+            pluginUniqueId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+        };
 
-            var self = {
-                pluginId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+        var _loadingConfig = false;
+
+        function getElement(selector) {
+            return document.querySelector(selector);
+        }
+
+        function resolveProfile(birthday, sex, override) {
+            if (override && override !== '') {
+                return override;
+            }
+            if (!birthday) {
+                return '—';
+            }
+            var dob = new Date(birthday);
+            var today = new Date();
+            var age = today.getUTCFullYear() - dob.getUTCFullYear();
+            var m = today.getUTCMonth() - dob.getUTCMonth();
+            if (m < 0 || (m === 0 && today.getUTCDate() < dob.getUTCDate())) {
+                age--;
+            }
+
+            if (age < 13) {
+                return 'child';
+            }
+            if (age < 18) {
+                return sex === 'female' ? 'teen_f' : 'teen_m';
+            }
+
+            return 'adult';
+        }
+
+        function profileBadgeStyle(profile) {
+            var colors = {
+                child: '#4caf50',
+                teen_m: '#2196f3',
+                teen_f: '#e91e63',
+                adult: '#9e9e9e'
             };
+            var color = colors[profile] || '#9e9e9e';
+            return 'display:inline-block;padding:2px 8px;border-radius:3px;background:' + color + ';color:#fff;font-size:0.85em;';
+        }
 
-            // Mirrors ProfileResolver.ResolveFromAgeSex logic
-            function resolveProfile(birthday, sex, override) {
-                if (override && override !== '') return override;
-                if (!birthday) return '—';
-                var dob = new Date(birthday);
-                var today = new Date();
-                var age = today.getUTCFullYear() - dob.getUTCFullYear();
-                var m = today.getUTCMonth() - dob.getUTCMonth();
-                if (m < 0 || (m === 0 && today.getUTCDate() < dob.getUTCDate())) age--;
-                if (age < 13) return 'child';
-                if (age < 18) return sex === 'female' ? 'teen_f' : 'teen_m';
-                return 'adult';
+        function updateResolvedCell(row) {
+            if (!row) {
+                return;
             }
 
-            function profileBadgeStyle(profile) {
-                var colors = {
-                    child: '#4caf50',
-                    teen_m: '#2196f3',
-                    teen_f: '#e91e63',
-                    adult: '#9e9e9e'
-                };
-                var c = colors[profile] || '#9e9e9e';
-                return 'display:inline-block;padding:2px 8px;border-radius:3px;background:' + c + ';color:#fff;font-size:0.85em;';
+            var birthday = row.querySelector('.userBirthday');
+            var sex = row.querySelector('.userSex');
+            var override = row.querySelector('.userOverride');
+            var cell = row.querySelector('.resolvedProfile');
+
+            if (!birthday || !sex || !override || !cell) {
+                return;
             }
 
-            function updateResolvedCell(row) {
-                var birthday = row.querySelector('.userBirthday').value;
-                var sex      = row.querySelector('.userSex').value;
-                var override = row.querySelector('.userOverride').value;
-                var profile  = resolveProfile(birthday, sex, override);
-                var cell     = row.querySelector('.resolvedProfile');
-                cell.innerHTML = '<span style="' + profileBadgeStyle(profile) + '">' + profile + '</span>';
-            }
+            var profile = resolveProfile(birthday.value, sex.value, override.value);
+            cell.innerHTML = '<span style="' + profileBadgeStyle(profile) + '">' + profile + '</span>';
+        }
 
-            function buildUserRow(user, stored) {
-                stored = stored || {};
-                var tr = document.createElement('tr');
-                tr.dataset.userId = user.Id;
-                tr.innerHTML = [
-                    '<td style="font-weight:500">' + user.Name + '</td>',
-                    '<td><input type="date" class="emby-input userBirthday" value="' + (stored.Birthday || '') + '" style="width:140px" /></td>',
-                    '<td>',
-                    '  <select class="emby-select userSex" style="width:100px">',
-                    '    <option value="unset"' + (stored.Sex === 'unset' || !stored.Sex ? ' selected' : '') + '>Not set</option>',
-                    '    <option value="male"'   + (stored.Sex === 'male'   ? ' selected' : '') + '>Male</option>',
-                    '    <option value="female"' + (stored.Sex === 'female' ? ' selected' : '') + '>Female</option>',
-                    '  </select>',
-                    '</td>',
-                    '<td>',
-                    '  <select class="emby-select userOverride" style="width:110px">',
-                    '    <option value=""'        + (!stored.ProfileOverride ? ' selected' : '') + '>Auto</option>',
-                    '    <option value="child"'   + (stored.ProfileOverride === 'child'   ? ' selected' : '') + '>Child</option>',
-                    '    <option value="teen_m"'  + (stored.ProfileOverride === 'teen_m'  ? ' selected' : '') + '>Teen (M)</option>',
-                    '    <option value="teen_f"'  + (stored.ProfileOverride === 'teen_f'  ? ' selected' : '') + '>Teen (F)</option>',
-                    '    <option value="adult"'   + (stored.ProfileOverride === 'adult'   ? ' selected' : '') + '>Adult</option>',
-                    '  </select>',
-                    '</td>',
-                    '<td class="resolvedProfile"></td>',
-                ].join('');
+        function buildUserRow(user, stored) {
+            var tr = document.createElement('tr');
+            tr.dataset.userId = user.Id || user.Id || '';
+            stored = stored || {};
 
-                tr.querySelector('.userBirthday').addEventListener('change', function () { updateResolvedCell(tr); });
-                tr.querySelector('.userSex').addEventListener('change',      function () { updateResolvedCell(tr); });
-                tr.querySelector('.userOverride').addEventListener('change', function () { updateResolvedCell(tr); });
+            tr.innerHTML =
+                '<td style="font-weight:500">' + (user.Name || user.Name || '') + '</td>' +
+                '<td><input type="date" class="emby-input userBirthday" value="' + (stored.Birthday || '') + '" style="width:140px" /></td>' +
+                '<td>' +
+                '  <select class="emby-select userSex" style="width:100px">' +
+                '    <option value="unset"' + ((stored.Sex === 'unset' || !stored.Sex) ? ' selected' : '') + '>Not set</option>' +
+                '    <option value="male"' + (stored.Sex === 'male' ? ' selected' : '') + '>Male</option>' +
+                '    <option value="female"' + (stored.Sex === 'female' ? ' selected' : '') + '>Female</option>' +
+                '  </select>' +
+                '</td>' +
+                '<td>' +
+                '  <select class="emby-select userOverride" style="width:110px">' +
+                '    <option value=""' + (!stored.ProfileOverride ? ' selected' : '') + '>Auto</option>' +
+                '    <option value="child"' + (stored.ProfileOverride === 'child' ? ' selected' : '') + '>Child</option>' +
+                '    <option value="teen_m"' + (stored.ProfileOverride === 'teen_m' ? ' selected' : '') + '>Teen (M)</option>' +
+                '    <option value="teen_f"' + (stored.ProfileOverride === 'teen_f' ? ' selected' : '') + '>Teen (F)</option>' +
+                '    <option value="adult"' + (stored.ProfileOverride === 'adult' ? ' selected' : '') + '>Adult</option>' +
+                '  </select>' +
+                '</td>' +
+                '<td class="resolvedProfile"></td>';
 
+            tr.querySelector('.userBirthday').addEventListener('change', function () {
                 updateResolvedCell(tr);
-                return tr;
+            });
+            tr.querySelector('.userSex').addEventListener('change', function () {
+                updateResolvedCell(tr);
+            });
+            tr.querySelector('.userOverride').addEventListener('change', function () {
+                updateResolvedCell(tr);
+            });
+
+            updateResolvedCell(tr);
+            return tr;
+        }
+
+        function normalizeUsersResponse(response) {
+            if (Array.isArray(response)) {
+                return response;
             }
 
-            self.loadUsers = function (savedConfig) {
-                ApiClient.getUsers().then(function (users) {
-                    var tbody = document.getElementById('userProfileTableBody');
-                    tbody.innerHTML = '';
-                    var stored = savedConfig.UserProfiles || {};
+            if (!response) {
+                return [];
+            }
+
+            if (Array.isArray(response.Items)) {
+                return response.Items;
+            }
+
+            return [];
+        }
+
+        function loadUsers(savedConfig) {
+            var tbody = getElement('#userProfileTableBody');
+            if (!tbody) {
+                return Promise.resolve();
+            }
+
+            tbody.innerHTML = '';
+
+            if (!ApiClient || typeof ApiClient.getUsers !== 'function') {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 1em; color:red;">API does not support user lookup</td></tr>';
+                return Promise.resolve();
+            }
+
+            return ApiClient.getUsers()
+                .then(function (response) {
+                    var users = normalizeUsersResponse(response);
+                    var stored = (savedConfig && savedConfig.UserProfiles) ? savedConfig.UserProfiles : {};
+
                     users.forEach(function (user) {
-                        tbody.appendChild(buildUserRow(user, stored[user.Id]));
+                        var row = buildUserRow(user, stored[user.Id] || {});
+                        tbody.appendChild(row);
                     });
+
+                    if (users.length === 0) {
+                        var row = document.createElement('tr');
+                        row.innerHTML = '<td colspan="5" style="text-align:center; padding: 1em;">No users found</td>';
+                        tbody.appendChild(row);
+                    }
+                })
+                .catch(function () {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 1em; color:red;">Failed to load users</td></tr>';
                 });
-            };
+        }
 
-            self.save = function () {
-                ApiClient.getPluginConfiguration(self.pluginId).then(function (savedConfig) {
-                    savedConfig.Enabled         = document.getElementById('enableSmartBranching').checked;
-                    savedConfig.DefaultProfile  = document.getElementById('defaultProfile').value;
-                    savedConfig.NsfwThreshold   = parseFloat(document.getElementById('nsfwThreshold').value);
-                    savedConfig.FillerDirectory = document.getElementById('fillerDirectory').value;
-                    savedConfig.DefaultAction   = document.getElementById('defaultAction').value;
+        function loadConfig() {
+            if (_loadingConfig || !window.ApiClient) {
+                return Promise.resolve();
+            }
 
-                    // Collect per-user profile data from the table
+            _loadingConfig = true;
+            Dashboard.showLoadingMsg();
+
+            return ApiClient.getPluginConfiguration(SmartBranchingConfig.pluginUniqueId)
+                .then(function (config) {
+                    var pageForm = getElement('#smartBranchingConfigForm');
+                    if (!pageForm) {
+                        throw new Error('Config page not available');
+                    }
+
+                    getElement('#enableSmartBranching').checked = config.Enabled !== false;
+                    getElement('#defaultProfile').value = config.DefaultProfile || 'adult';
+                    getElement('#nsfwThreshold').value = config.NsfwThreshold || 0.6;
+                    getElement('#fillerDirectory').value = config.FillerDirectory || 'smart_branching/filler';
+                    getElement('#defaultAction').value = config.DefaultAction || 'swap';
+
+                    return loadUsers(config);
+                })
+                .catch(function () {
+                    Dashboard.alert('Failed to load Smart Branching settings.');
+                })
+                .finally(function () {
+                    Dashboard.hideLoadingMsg();
+                    _loadingConfig = false;
+                });
+        }
+
+        function saveConfig(e) {
+            if (e && e.preventDefault) {
+                e.preventDefault();
+            }
+
+            if (!window.ApiClient) {
+                return false;
+            }
+
+            Dashboard.showLoadingMsg();
+
+            ApiClient.getPluginConfiguration(SmartBranchingConfig.pluginUniqueId)
+                .then(function (config) {
+                    config.Enabled = getElement('#enableSmartBranching').checked;
+                    config.DefaultProfile = getElement('#defaultProfile').value;
+                    config.NsfwThreshold = parseFloat(getElement('#nsfwThreshold').value);
+                    config.FillerDirectory = getElement('#fillerDirectory').value;
+                    config.DefaultAction = getElement('#defaultAction').value;
+
+                    var rows = document.querySelectorAll('#userProfileTableBody tr[data-user-id]');
                     var userProfiles = {};
-                    document.querySelectorAll('#userProfileTableBody tr[data-user-id]').forEach(function (row) {
-                        var uid      = row.dataset.userId;
-                        var birthday = row.querySelector('.userBirthday').value;
-                        var sex      = row.querySelector('.userSex').value;
-                        var override = row.querySelector('.userOverride').value;
+
+                    rows.forEach(function (row) {
+                        var uid = row.dataset.userId;
+                        var birthday = row.querySelector('.userBirthday');
+                        var sex = row.querySelector('.userSex');
+                        var override = row.querySelector('.userOverride');
+
+                        if (!uid || !birthday || !sex || !override) {
+                            return;
+                        }
+
                         userProfiles[uid] = {
-                            Birthday:        birthday || null,
-                            Sex:             sex,
-                            ProfileOverride: override || null
+                            Birthday: birthday.value || null,
+                            Sex: sex.value,
+                            ProfileOverride: override.value || null
                         };
                     });
-                    savedConfig.UserProfiles = userProfiles;
 
-                    ApiClient.updatePluginConfiguration(self.pluginId, savedConfig).then(function () {
-                        Dashboard.alert('Configuration saved');
-                    });
+                    config.UserProfiles = userProfiles;
+                    return ApiClient.updatePluginConfiguration(SmartBranchingConfig.pluginUniqueId, config);
+                })
+                .then(function (result) {
+                    Dashboard.processPluginConfigurationUpdateResult(result);
+                })
+                .catch(function () {
+                    Dashboard.alert('Failed to save Smart Branching settings.');
+                })
+                .finally(function () {
+                    Dashboard.hideLoadingMsg();
                 });
-            };
 
-            self.load = function (config) {
-                document.getElementById('enableSmartBranching').checked    = config.Enabled !== false;
-                document.getElementById('defaultProfile').value            = config.DefaultProfile || 'adult';
-                document.getElementById('nsfwThreshold').value             = config.NsfwThreshold || 0.6;
-                document.getElementById('fillerDirectory').value           = config.FillerDirectory || 'smart_branching/filler';
-                document.getElementById('defaultAction').value             = config.DefaultAction || 'swap';
-                self.loadUsers(config);
-            };
+            return false;
+        }
 
-            document.querySelector('.formPopup').addEventListener('submit', function (e) {
-                e.preventDefault();
-                self.save();
-            });
+        function onConfigPageShow() {
+            if (getElement('#smartBranchingConfigForm')) {
+                loadConfig();
+            }
+        }
 
-            document.addEventListener('viewbeforeshow', function () {
-                ApiClient.getPluginConfiguration(self.pluginId).then(self.load);
-            });
-        })();
+        function onPageEvent(e) {
+            if (e && e.target && e.target.id === 'smartBranchingConfigPage') {
+                onConfigPageShow();
+            }
+        }
+
+        var page = getElement('#smartBranchingConfigPage');
+        var form = getElement('#smartBranchingConfigForm');
+        if (page) {
+            page.addEventListener('pageshow', onConfigPageShow);
+        }
+
+        document.addEventListener('viewbeforeshow', onPageEvent);
+        document.addEventListener('pageshow', onPageEvent);
+
+        if (form) {
+            form.addEventListener('submit', saveConfig);
+        }
     </script>
 </body>
 </html>
