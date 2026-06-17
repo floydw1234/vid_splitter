@@ -19,6 +19,7 @@ def test_analyze_module_keeps_docstring_and_has_coordinator_comment():
     assert content.startswith('"""')
     assert "Smart Branching Analyzer" in content
     assert "coordinates analysis" in content
+    assert "smoke comment marker" in content.lower()
 
 
 def test_skin_detector_module_contains_heuristic_and_conservative_comment():
