@@ -21,6 +21,7 @@ def test_filler_module_has_low_information_comment_without_docstring():
 
     assert filler_module.__doc__ is None
     assert "low-information speech spans" in content
+    assert "smoke comment marker" in content.lower()
 
 
 def test_pick_filler_window_is_deterministic_for_same_seed():

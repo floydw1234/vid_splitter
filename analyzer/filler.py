@@ -1,4 +1,5 @@
 # Filler helpers identify low-information speech spans for replacement clips.
+# smoke comment marker
 from __future__ import annotations
 
 import argparse
