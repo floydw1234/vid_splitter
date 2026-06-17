@@ -10,6 +10,7 @@ Tests:
 Usage:
   python test_pipeline.py
 """
+# smoke comment marker
 import sys
 from pathlib import Path
 from unittest.mock import patch
