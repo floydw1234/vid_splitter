@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# smoke comment marker
 
 def test_root_readme_documents_fast_python_tests_csharp_reference_and_optional_smoke():
     repo_root = Path(__file__).resolve().parents[1]
