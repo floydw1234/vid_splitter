@@ -41,12 +41,12 @@ def test_analyzer_manifest():
         # Test 1a: Empty detections → single safe segment
         detections = []
         segments = analyzer._merge_segments(detections, 60.0)
-        assert len(segments) == 1
-        assert segments[0]["risk"] == "safe"
+        assert len(segments) == 12
+        assert all(seg["risk"] == "safe" for seg in segments)
         assert segments[0]["action"] == "play"
         assert segments[0]["start_time"] == 0
-        assert segments[0]["end_time"] == 60.0
-        print("  ✅ Empty detections → single safe segment")
+        assert segments[-1]["end_time"] == 60.0
+        print("  ✅ Empty detections → safe buckets across the full timeline")
 
         # Test 1b: With a maturity detection → splits into safe + mature
         detections = [{
@@ -58,28 +58,48 @@ def test_analyzer_manifest():
         segments = analyzer._merge_segments(detections, 60.0)
         mature = [s for s in segments if s["risk"] == "mature"]
         safe = [s for s in segments if s["risk"] == "safe"]
-        assert len(mature) >= 1, f"Expected mature segments, got: {segments}"
-        assert len(safe) >= 1, f"Expected safe segments, got: {segments}"
-        print(f"  ✅ With detection → {len(mature)} mature, {len(safe)} safe segments")
+        assert len(mature) == 1, f"Expected one mature bucket, got: {segments}"
+        assert mature[0]["start_time"] == 25.0
+        assert mature[0]["end_time"] == 30.0
+        assert len(safe) == 11, f"Expected remaining safe buckets, got: {segments}"
+        print(f"  ✅ With detection → {len(mature)} mature bucket, {len(safe)} safe buckets")
 
-        # Test 1c: Multiple detections close together → merged into one segment
+        # Test 1c: Multiple detections close together → separate mature buckets
         detections = [
             {"time": 10, "type": "audio", "tags": ["language"], "score": 1.0},
             {"time": 15, "type": "visual", "tags": ["nudity"], "score": 0.8},
             {"time": 20, "type": "audio", "tags": ["language"], "score": 1.0},
         ]
         segments = analyzer._merge_segments(detections, 60.0)
-        # All three should merge into one mature segment (within 5s interval)
         mature = [s for s in segments if s["risk"] == "mature"]
-        assert len(mature) == 1, f"Expected 1 merged mature segment, got {len(mature)}: {segments}"
+        assert len(mature) == 3, f"Expected 3 mature buckets, got {len(mature)}: {segments}"
         tags = set()
         for s in mature:
             tags.update(s["tags"])
         assert "language" in tags
         assert "nudity" in tags
-        print("  ✅ Close detections merged into single segment with combined tags")
+        print("  ✅ Close detections produce separate mature buckets with combined tags")
 
-        # Test 1d: Gap filling — detections don't cover full duration
+        # Test 1d: Refined visual span marks every overlapping bucket
+        detections = [
+            {
+                "time": 6,
+                "type": "nudity",
+                "score": 0.9,
+                "bad_start": 6.0,
+                "bad_end": 18.0,
+            },
+        ]
+        segments = analyzer._merge_segments(detections, 25.0)
+        mature = [s for s in segments if s["risk"] == "mature"]
+        assert [(s["start_time"], s["end_time"]) for s in mature] == [
+            (5.0, 10.0),
+            (10.0, 15.0),
+            (15.0, 20.0),
+        ]
+        print("  ✅ Refined visual spans mark each overlapping 5s bucket")
+
+        # Test 1e: Gap filling — detections don't cover full duration
         detections = [
             {"time": 25, "type": "audio", "tags": ["language"], "score": 1.0},
         ]
@@ -88,7 +108,7 @@ def test_analyzer_manifest():
         assert abs(total_coverage - 120.0) < 1.0, f"Gap filling failed: coverage={total_coverage}"
         print("  ✅ Gap filling works — full duration covered")
 
-        # Test 1e: Manifest structure
+        # Test 1f: Manifest structure
         manifest = analyzer._build_manifest(segments, 60.0)
         assert "movie_id" in manifest
         assert "duration_seconds" in manifest
@@ -183,27 +203,26 @@ def test_segment_merging_edge_cases():
         segments = analyzer._merge_segments(detections, 60.0)
         assert segments[0]["risk"] == "mature"
         assert segments[0]["start_time"] == 0
+        assert segments[0]["end_time"] == 5.0
         print("  ✅ Detection at t=0 handled correctly")
 
         # Edge case 2: Detection at exact end
         detections = [{"time": 55, "type": "audio", "tags": ["language"], "score": 1.0}]
         segments = analyzer._merge_segments(detections, 60.0)
-        assert any(s["risk"] == "mature" for s in segments)
         last_seg = segments[-1]
+        assert last_seg["risk"] == "mature"
         assert last_seg["end_time"] == 60.0
         print("  ✅ Detection near end handled correctly")
 
-        # Edge case 3: Many small gaps between detections
+        # Edge case 3: Partial final bucket on non-multiple durations
         detections = [
-            {"time": i * 6, "type": "audio", "tags": ["language"], "score": 1.0}
-            for i in range(10)  # Every 6s, so gaps of 1s between segments
+            {"time": 10, "type": "audio", "tags": ["language"], "score": 1.0}
         ]
-        segments = analyzer._merge_segments(detections, 60.0)
-        # Each detection creates its own segment (6s apart > 5s interval)
-        # Plus gap fillers between them
-        total = sum(s["end_time"] - s["start_time"] for s in segments)
-        assert abs(total - 60.0) < 2.0, f"Coverage wrong: {total}"
-        print(f"  ✅ Many detections → {len(segments)} segments, full coverage")
+        segments = analyzer._merge_segments(detections, 12.0)
+        assert len(segments) == 3
+        assert segments[-1]["start_time"] == 10.0
+        assert segments[-1]["end_time"] == 12.0
+        print("  ✅ Non-multiple durations keep a shorter final bucket")
 
     print("✅ Test 3 passed\n")
 

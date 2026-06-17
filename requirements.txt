@@ -9,4 +9,5 @@ accelerate
 diffusers
 safety-checker
 Pillow
+opencv-python-headless
 zstandard

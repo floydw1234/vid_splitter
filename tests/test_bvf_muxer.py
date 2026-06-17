@@ -139,6 +139,54 @@ def test_profile_resolution_entries_are_embedded(tmp_path: Path, segments, profi
     assert mature["profiles"]["adult"]["action"] == "play"
 
 
+def test_profile_segment_id_routes_nudity_swaps_to_filler_assets(tmp_path: Path):
+    profiles = {
+        "child": {"name": "Child", "filters": {"nudity": "swap"}},
+        "teen_m": {"name": "Teen Male", "filters": {"nudity": "swap"}},
+        "teen_f": {"name": "Teen Female", "filters": {"nudity": "swap"}},
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "tags": ["nudity"],
+            "risk": "mature",
+            "action": "swap",
+            "profile_segment_id": "filler_001",
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-main",
+        },
+        {
+            "id": "filler_001",
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "is_filler": True,
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-filler",
+        },
+    ]
+
+    manifest = BvfMuxer.read_bvf(
+        BvfMuxer(movie_id="movie", title="Movie").write_bvf(
+            tmp_path / "movie.bvf",
+            segments=segments,
+            duration_seconds=5.0,
+            profiles=profiles,
+        )
+    )["manifest"]
+
+    mature = next(seg for seg in manifest["segments"] if seg["id"] == "seg_001")
+    assert mature["profiles"]["child"] == {"action": "swap", "segment_id": "filler_001"}
+    assert mature["profiles"]["teen_m"] == {"action": "swap", "segment_id": "filler_001"}
+    assert mature["profiles"]["teen_f"] == {"action": "swap", "segment_id": "filler_001"}
+    assert mature["profiles"]["adult"] == {"action": "play", "segment_id": "seg_001"}
+
+
 def _write_fixture(tmp_path: Path) -> Path:
     profiles = {
         "child": {"name": "Child", "filters": {"nudity": "swap"}},

@@ -14,13 +14,14 @@ Usage:
 """
 import sys
 import argparse
+import hashlib
 import json
 import logging
 import subprocess
 import tempfile
 from bisect import bisect_left
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from PIL import Image
 import numpy as np
@@ -30,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from vid_splitter.bvf_muxer import BvfMuxer
+from analyzer.filler import pick_filler_window
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -109,6 +111,7 @@ class MovieAnalyzer:
         self.demo_filler_video = Path(demo_filler_video).resolve() if demo_filler_video else None
         self.demo_filler_start = max(0.0, demo_filler_start)
         self.demo_filler_duration = demo_filler_duration
+        self.goldylocks_filler_video = (REPO_ROOT / "videos" / "goldylocks.mp4").resolve()
 
         if load_models:
             self._load_models()
@@ -176,7 +179,10 @@ class MovieAnalyzer:
         logger.info("Classifying segments for topics with LLM...")
         segments = self._classify_topics(segments)
 
-        segments = self._snap_segments_to_keyframes(segments, self.video_path, duration)
+        # Keep analyzer output on the requested frame_interval cadence. Segment
+        # media is re-encoded below, so cuts no longer need to be snapped to
+        # sparse source keyframes.
+        segments = self._attach_goldylocks_fillers(segments)
 
         # 6. Generate manifest
         manifest = self._build_manifest(segments, duration)
@@ -632,25 +638,40 @@ class MovieAnalyzer:
             from analyzer.topic_classifier import LLMTopicClassifier
             clf = LLMTopicClassifier()
 
-            # Build transcript segments for classification
+            # Build transcript segments for classification. With 5s BVF buckets,
+            # most segments are silent/empty; avoid spending one LLM request per
+            # empty bucket because that makes production runs crawl.
             transcript_segs = []
-            for seg in segments:
-                # Extract transcript for this time range
+            segment_indices = []
+            for idx, seg in enumerate(segments):
                 start = seg.get("start_time", 0)
                 end = seg.get("end_time", 0)
-                transcript = self._extract_transcript_for_segment(start, end)
+                transcript = self._extract_transcript_for_segment(start, end).strip()
+                if not transcript:
+                    continue
+                segment_indices.append(idx)
                 transcript_segs.append({
                     "transcript": transcript,
                     "start_time": start,
                     "end_time": end,
                 })
 
-            # Classify
+            if not transcript_segs:
+                return segments
+
+            if len(transcript_segs) > 40:
+                logger.info(
+                    "Skipping LLM topic classification for %d short segments; "
+                    "5s bucketed analysis would otherwise issue one request per segment.",
+                    len(transcript_segs),
+                )
+                return segments
+
             classified = clf.classify_segments(transcript_segs)
 
-            # Add topics back to segments
-            for seg, cls in zip(segments, classified):
-                seg["topics"] = cls.get("topics", [])
+            # Add topics back only to the non-empty transcript segments.
+            for idx, cls in zip(segment_indices, classified):
+                segments[idx]["topics"] = cls.get("topics", [])
 
         except Exception as e:
             logger.warning(f"LLM topic classification failed: {e}")
@@ -690,67 +711,54 @@ class MovieAnalyzer:
         uses those precise times. Falls back to frame_interval extension
         for audio detections and unrefined visual detections.
         """
-        if not detections:
-            # No flags at all — one safe segment covering the whole video
-            return [{
-                "id": "seg_001",
-                "start_time": 0,
-                "end_time": duration,
-                "tags": [],
-                "risk": "safe",
-                "action": "play",
-            }]
+        num_buckets = max(1, int(np.ceil(duration / self.frame_interval)))
+        bucket_tags = [set() for _ in range(num_buckets)]
+
+        for det in detections:
+            start_time, end_time = self._detection_time_range(det, duration)
+            if end_time <= start_time:
+                continue
+
+            tags = self._detection_tags(det)
+            if not tags:
+                continue
+
+            for bucket_idx in range(num_buckets):
+                bucket_start = bucket_idx * self.frame_interval
+                bucket_end = min(duration, bucket_start + self.frame_interval)
+                if start_time < bucket_end and end_time > bucket_start:
+                    bucket_tags[bucket_idx].update(tags)
 
         segments = []
-        current_tags = set()
-        current_start = detections[0]["time"]
-        current_end = None
+        for bucket_idx in range(num_buckets):
+            start_time = round(bucket_idx * self.frame_interval, 2)
+            end_time = round(min(duration, (bucket_idx + 1) * self.frame_interval), 2)
+            tags = sorted(bucket_tags[bucket_idx])
+            risk = "mature" if tags else "safe"
+            segments.append({
+                "id": f"seg_{bucket_idx + 1:03d}",
+                "start_time": start_time,
+                "end_time": end_time,
+                "tags": tags,
+                "risk": risk,
+                "action": "swap" if risk == "mature" else "play",
+            })
 
-        for i, det in enumerate(detections):
-            current_tags.update(det["tags"]) if det["type"] == "audio" else current_tags.add("nudity")
+        return [seg for seg in segments if seg["end_time"] > seg["start_time"]]
 
-            # Determine this detection's end time
-            if "bad_end" in det:
-                # Refined boundary from binary search
-                seg_end = det["bad_end"]
-            else:
-                # Fallback: extend by frame_interval
-                seg_end = min(det["time"] + self.frame_interval, duration)
+    def _detection_time_range(self, detection: dict, duration: float) -> tuple[float, float]:
+        start_time = float(detection.get("bad_start", detection.get("time", 0.0)))
+        end_time = float(detection.get("bad_end", start_time + self.frame_interval))
+        start_time = max(0.0, min(start_time, duration))
+        end_time = max(start_time, min(end_time, duration))
+        return start_time, end_time
 
-            # Update current segment end
-            if current_end is None:
-                current_end = seg_end
-            else:
-                current_end = max(current_end, seg_end)
-
-            # Check if next detection is within frame_interval (contiguous)
-            is_last = i == len(detections) - 1
-            next_time = detections[i + 1]["time"] if not is_last else duration
-
-            if is_last or (next_time - det["time"]) > self.frame_interval:
-                # End of a contiguous group
-                current_end = min(current_end or seg_end, duration)
-
-                tags = sorted(current_tags)
-                risk = "mature" if tags else "safe"
-
-                segments.append({
-                    "id": f"seg_{len(segments)+1:03d}",
-                    "start_time": round(current_start, 2),
-                    "end_time": round(current_end, 2),
-                    "tags": tags,
-                    "risk": risk,
-                    "action": "swap" if risk == "mature" else "play",
-                })
-
-                current_tags = set()
-                current_start = next_time
-                current_end = None
-
-        # Ensure we cover the full duration — fill any gaps
-        segments = self._fill_gaps(segments, duration)
-
-        return segments
+    @staticmethod
+    def _detection_tags(detection: dict) -> list[str]:
+        if detection.get("tags"):
+            return list(detection["tags"])
+        detection_type = str(detection.get("type", "")).strip().lower()
+        return [detection_type] if detection_type else []
 
     def _fill_gaps(self, segments: list[dict], duration: float) -> list[dict]:
         """Fill time gaps between segments with safe segments."""
@@ -815,9 +823,12 @@ class MovieAnalyzer:
                 "tags": seg.get("tags", []),
                 "topics": seg.get("topics", []),
                 "risk": seg.get("risk", "safe"),
+                "action": seg.get("action", "play"),
             }
             if seg.get("profiles"):
                 manifest_seg["profiles"] = seg["profiles"]
+            if seg.get("profile_segment_id"):
+                manifest_seg["profile_segment_id"] = seg["profile_segment_id"]
             if seg.get("is_filler"):
                 manifest_seg["is_filler"] = True
             if seg.get("source_path"):
@@ -839,10 +850,86 @@ class MovieAnalyzer:
             "movie_id": self.video_path.stem,
             "movie_path": str(self.video_path),
             "duration_seconds": round(duration, 2),
-            "analyzed_at": datetime.utcnow().isoformat(),
+            "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "profiles": DEFAULT_PROFILES,
             "segments": manifest_segments,
         }
+
+    def _attach_goldylocks_fillers(self, segments: list[dict]) -> list[dict]:
+        nudity_segments = [
+            seg for seg in segments
+            if not seg.get("is_filler") and "nudity" in set(seg.get("tags", []))
+        ]
+        if not nudity_segments:
+            return segments
+
+        if not self.goldylocks_filler_video.exists():
+            logger.warning(
+                "Goldilocks filler video is missing at %s; leaving nudity swap targets unchanged.",
+                self.goldylocks_filler_video,
+            )
+            return segments
+
+        try:
+            filler_duration = self._get_duration_for_path(self.goldylocks_filler_video)
+        except Exception as exc:
+            logger.warning(
+                "Failed to probe Goldilocks filler video at %s; leaving nudity swap targets unchanged: %s",
+                self.goldylocks_filler_video,
+                exc,
+            )
+            return segments
+
+        updated_segments = [dict(seg) for seg in segments]
+        filler_segments: list[dict] = []
+
+        for seg in updated_segments:
+            if seg.get("is_filler") or "nudity" not in set(seg.get("tags", [])):
+                continue
+
+            segment_duration = max(0.01, float(seg["end_time"]) - float(seg["start_time"]))
+            try:
+                selection = pick_filler_window(
+                    duration=filler_duration,
+                    desired_length=segment_duration,
+                    seed=self._segment_seed(seg),
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "Failed to select Goldilocks filler for %s; leaving original segment in place: %s",
+                    seg["id"],
+                    exc,
+                )
+                continue
+
+            filler_id = f"filler_{len(filler_segments) + 1:03d}"
+            seg["profile_segment_id"] = filler_id
+            filler_segments.append({
+                "id": filler_id,
+                "start_time": 0.0,
+                "end_time": round(selection.length, 3),
+                "tags": [],
+                "risk": "safe",
+                "action": "play",
+                "is_filler": True,
+                "source_path": str(self.goldylocks_filler_video),
+                "source_start_time": round(selection.start, 3),
+                "source_end_time": round(selection.end, 3),
+            })
+
+        if filler_segments:
+            logger.info(
+                "Attached %d Goldilocks filler segment(s) for nudity swaps.",
+                len(filler_segments),
+            )
+        return updated_segments + filler_segments
+
+    def _segment_seed(self, segment: dict) -> int:
+        seed_input = (
+            f"{self.video_path}|{segment.get('id')}|"
+            f"{segment.get('start_time', 0.0):.3f}|{segment.get('end_time', 0.0):.3f}"
+        )
+        return int(hashlib.sha256(seed_input.encode("utf-8")).hexdigest()[:8], 16)
 
 
     def analyze_demo_branch(self) -> dict:
@@ -1064,7 +1151,11 @@ class MovieAnalyzer:
                 "-t", f"{duration:.3f}",
                 "-map", "0:v:0",
                 "-map", "0:a?",
-                "-c", "copy",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "128k",
                 "-avoid_negative_ts", "make_zero",
                 "-reset_timestamps", "1",
                 "-movflags", "frag_keyframe+empty_moov+default_base_moof",
