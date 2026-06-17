@@ -34,4 +34,5 @@ def test_skin_detector_module_has_smoke_marker_near_header():
     lines = skin_detector.read_text(encoding="utf-8").splitlines()
 
     assert lines[5] == "# smoke comment marker"
-    assert lines[6] == "import logging"
+    assert lines[6].startswith("# heuristic and conservative")
+    assert lines[7] == "import logging"
