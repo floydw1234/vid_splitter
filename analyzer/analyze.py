@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 # This module coordinates analysis steps across the pipeline.
 # Profanity list — expand as needed
+# smoke comment marker
 PROFANITY_LIST = [
     "fuck", "shit", "damn", "hell", "bastard", "asshole", "bitch",
     "cunt", "pussy", "dick", "cock", "nigger", "nigga", "faggot",
