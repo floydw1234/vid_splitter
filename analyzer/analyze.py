@@ -10,7 +10,7 @@ Architecture:
   5. BVF output → movie.bvf
 
 Usage:
-  python analyze.py "path/to/movie.mp4" [--model base|tiny|medium] [--threshold 0.7]
+  python analyze.py "path/to/movie.mp4" [--model base|tiny|medium] [--threshold 0.75]
 """
 import sys
 import argparse
@@ -23,7 +23,7 @@ from bisect import bisect_left
 from pathlib import Path
 from datetime import datetime, timezone
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +35,12 @@ from analyzer.filler import pick_filler_window
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+FALCON_TRIGGER_GATE = 0.5
+DARK_FRAME_LUMA_THRESHOLD = 70.0
+DARK_SCENE_SKIN_GATE = 0.75
+BRIGHTNESS_RESCUE_GAIN = 1.75
+CONTRAST_RESCUE_GAIN = 1.15
 
 # This module coordinates analysis steps across the pipeline.
 # Profanity list — expand as needed
@@ -50,7 +56,7 @@ DEFAULT_PROFILES = {
         "name": "Child (under 13)",
         "description": "Blocks all mature content",
         "filters": {
-            "nudity": "swap",
+            "nudity": "skip",
             "violence": "blur",
             "language": "mute",
             "gore": "skip",
@@ -64,7 +70,7 @@ DEFAULT_PROFILES = {
         "name": "Teen Male (13-17)",
         "description": "Blocks nudity and gore",
         "filters": {
-            "nudity": "swap",
+            "nudity": "skip",
             "gore": "skip",
             "profanity": "mute",
         },
@@ -73,7 +79,7 @@ DEFAULT_PROFILES = {
         "name": "Teen Female (13-17)",
         "description": "Blocks nudity and violence",
         "filters": {
-            "nudity": "swap",
+            "nudity": "skip",
             "violence": "blur",
             "profanity": "mute",
         },
@@ -93,9 +99,15 @@ class MovieAnalyzer:
         video_path: str,
         output_dir: str | None = None,
         whisper_model: str = "base",
-        nsfw_threshold: float = 0.6,
+        nsfw_threshold: float = 0.75,
         cartoon_threshold: float = 0.8,
         frame_interval: int = 5,
+        scan_interval: float | None = None,
+        candidate_threshold: float = 0.25,
+        dense_rescan_fps: float = 2.0,
+        dense_window_padding: float = 5.0,
+        min_positive_frames: int = 2,
+        debug_contact_sheet: str | Path | None = None,
         load_models: bool = True,
         demo_filler_video: str | None = None,
         demo_filler_start: float = 0.0,
@@ -106,12 +118,19 @@ class MovieAnalyzer:
         self.whisper_model_name = whisper_model
         self.nsfw_threshold = nsfw_threshold
         self.cartoon_threshold = cartoon_threshold
-        self.frame_interval = frame_interval  # seconds between frame samples
+        self.frame_interval = float(frame_interval)  # output segment bucket cadence
+        self.scan_interval = float(scan_interval) if scan_interval is not None else float(frame_interval)
+        self.candidate_threshold = round(float(candidate_threshold), 4)
+        self.dense_rescan_fps = max(0.001, float(dense_rescan_fps))
+        self.dense_window_padding = max(0.0, float(dense_window_padding))
+        self.min_positive_frames = max(1, int(min_positive_frames))
+        self.debug_contact_sheet = Path(debug_contact_sheet).expanduser() if debug_contact_sheet else None
         self.last_bvf_path: Path | None = None
         self.demo_filler_video = Path(demo_filler_video).resolve() if demo_filler_video else None
         self.demo_filler_start = max(0.0, demo_filler_start)
         self.demo_filler_duration = demo_filler_duration
         self.goldylocks_filler_video = (REPO_ROOT / "videos" / "goldylocks.mp4").resolve()
+        self.skin_detector = None
 
         if load_models:
             self._load_models()
@@ -143,11 +162,17 @@ class MovieAnalyzer:
             "Falconsai/nsfw_image_detection"
         )
 
-        logger.info("Loading Skin Detector (HSV-based)...")
-        from analyzer.skin_detector import SkinDetector
-        self.skin_detector = SkinDetector()
+        self._get_skin_detector()
 
         logger.info("Models loaded. Ready to analyze.")
+
+    def _get_skin_detector(self):
+        if self.skin_detector is None:
+            logger.info("Loading Skin Detector (HSV-based)...")
+            from analyzer.skin_detector import SkinDetector
+
+            self.skin_detector = SkinDetector()
+        return self.skin_detector
 
     def analyze(self) -> dict:
         """Run the full analysis pipeline and return the manifest dict."""
@@ -166,7 +191,11 @@ class MovieAnalyzer:
         self._transcript_data = transcript_data  # Store for topic classification
 
         # 3. Extract frames and run NSFW detection
-        logger.info(f"Extracting frames (every {self.frame_interval}s)...")
+        logger.info(
+            "Scanning frames (broad every %.2fs, buckets every %.2fs)...",
+            self.scan_interval,
+            self.frame_interval,
+        )
         frame_results = self._extract_and_classify_frames(duration)
 
         # 4. Build time-binned detections
@@ -251,81 +280,315 @@ class MovieAnalyzer:
     # ─── Step 3: Frame Extraction + NSFW ────────────────────────────────
 
     def _extract_and_classify_frames(self, duration: float) -> list[dict]:
-        """Extract one frame every `frame_interval` seconds and classify for NSFW.
-
-        When a frame is flagged, binary-search backward and forward to find the
-        exact boundaries where content becomes bad/safe.
-        """
+        """Run a broad scan, then densely rescan only candidate windows."""
         frames_dir = self.output_dir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
 
+        broad_results = []
+        for i, timestamp in enumerate(self._build_scan_timestamps(0.0, duration, self.scan_interval)):
+            scan_result = self._scan_frame_at_timestamp(
+                timestamp=timestamp,
+                duration=duration,
+                phase="broad",
+                frames_dir=frames_dir,
+                label=f"{i:04d}",
+            )
+            if scan_result is not None:
+                broad_results.append(scan_result)
+
+        candidate_frames = [
+            result for result in broad_results
+            if self._is_candidate_frame(result["classification"])
+        ]
+        candidate_windows = self._merge_candidate_windows(candidate_frames, duration)
+        logger.info(
+            "Broad scan sampled %d frame(s), found %d candidate frame(s), and merged them into %d window(s).",
+            len(broad_results),
+            len(candidate_frames),
+            len(candidate_windows),
+        )
+
+        dense_results = []
+        detections = []
+        for window_index, window in enumerate(candidate_windows):
+            window_results = self._scan_dense_window(
+                window=window,
+                window_index=window_index,
+                duration=duration,
+                frames_dir=frames_dir,
+            )
+            dense_results.extend(window_results)
+            detection = self._build_dense_window_detection(
+                window=window,
+                dense_results=window_results,
+                duration=duration,
+                frames_dir=frames_dir,
+            )
+            if detection is not None:
+                detections.append(detection)
+
+        if self.debug_contact_sheet:
+            self._export_debug_contact_sheet(broad_results + dense_results)
+
+        logger.info(
+            "Dense scan sampled %d frame(s) across %d candidate window(s) and confirmed %d mature detection(s).",
+            len(dense_results),
+            len(candidate_windows),
+            len(detections),
+        )
+        return detections
+
+    def _build_scan_timestamps(
+        self,
+        start_time: float,
+        end_time: float,
+        interval: float,
+        *,
+        include_end: bool = False,
+    ) -> list[float]:
+        start_time = max(0.0, float(start_time))
+        end_time = max(start_time, float(end_time))
+        interval = max(0.001, float(interval))
+
+        timestamps = []
+        current = start_time
+        while current < end_time - 1e-6:
+            timestamps.append(round(current, 3))
+            current += interval
+
+        if not timestamps:
+            timestamps.append(round(start_time, 3))
+
+        if include_end and end_time > timestamps[-1] + 1e-6:
+            timestamps.append(round(end_time, 3))
+
+        return timestamps
+
+    @staticmethod
+    def _clamp_sample_time(timestamp: float, duration: float) -> float:
+        if duration <= 0:
+            return 0.0
+        return round(max(0.0, min(float(timestamp), max(0.0, duration - 0.001))), 3)
+
+    def _scan_frame_at_timestamp(
+        self,
+        *,
+        timestamp: float,
+        duration: float,
+        phase: str,
+        frames_dir: Path,
+        label: str,
+    ) -> dict | None:
+        sample_time = self._clamp_sample_time(timestamp, duration)
+        frame_path = frames_dir / f"{phase}_{label}_{sample_time:010.3f}.jpg"
+
+        try:
+            self._extract_frame(sample_time, frame_path)
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+            logger.warning("Failed to extract %s frame at %.2fs: %s", phase, sample_time, stderr)
+            return None
+
+        if not frame_path.exists():
+            return None
+
+        is_cartoon = self._detect_cartoon(frame_path)
+        media_type = "cartoon" if is_cartoon else "live_action"
+        threshold = self.cartoon_threshold if is_cartoon else self.nsfw_threshold
+        classification = self._classify_frame_details(frame_path, threshold=threshold)
+        self._log_nudity_detection(
+            timestamp=sample_time,
+            classification=classification,
+            media_type=media_type,
+            is_cartoon=is_cartoon,
+            phase=phase,
+        )
+        return {
+            "time": sample_time,
+            "requested_time": round(float(timestamp), 3),
+            "phase": phase,
+            "frame_path": str(frame_path),
+            "media_type": media_type,
+            "is_cartoon": is_cartoon,
+            "classification": classification,
+        }
+
+    def _is_candidate_frame(self, classification: dict) -> bool:
+        return float(classification.get("score", 0.0)) >= self.candidate_threshold
+
+    def _merge_candidate_windows(
+        self,
+        candidate_frames: list[dict],
+        duration: float,
+    ) -> list[tuple[float, float]]:
+        if not candidate_frames:
+            return []
+
+        windows = []
+        for frame in sorted(candidate_frames, key=lambda item: float(item.get("time", 0.0))):
+            timestamp = float(frame.get("time", 0.0))
+            start_time = max(0.0, timestamp - self.dense_window_padding)
+            end_time = min(float(duration), timestamp + self.dense_window_padding)
+            if end_time <= start_time:
+                continue
+
+            if not windows or start_time > windows[-1][1] + 1e-6:
+                windows.append([start_time, end_time])
+            else:
+                windows[-1][1] = max(windows[-1][1], end_time)
+
+        return [(round(start, 2), round(end, 2)) for start, end in windows]
+
+    def _scan_dense_window(
+        self,
+        *,
+        window: tuple[float, float],
+        window_index: int,
+        duration: float,
+        frames_dir: Path,
+    ) -> list[dict]:
+        step = 1.0 / self.dense_rescan_fps
         results = []
-        num_frames = max(1, int(np.ceil(duration / self.frame_interval)))
-
-        for i in range(num_frames):
-            start_time = i * self.frame_interval
-            frame_path = frames_dir / f"frame_{i:04d}.jpg"
-
-            # Extract single frame at exact timestamp
-            try:
-                (
-                    self._extract_frame(start_time, frame_path)
-                )
-            except subprocess.CalledProcessError as e:
-                stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
-                logger.warning(f"Failed to extract frame at {start_time}s: {stderr}")
-                continue
-
-            if not frame_path.exists():
-                continue
-
-            # Classify with safety checker → (confidence, has_nsfw_concept)
-            nsfw_score, has_nsfw = self._classify_frame(frame_path)
-
-            if has_nsfw:
-                # Detect if frame is cartoon/anime
-                is_cartoon = self._detect_cartoon(frame_path)
-
-                # Use appropriate threshold based on media type
-                threshold = self.cartoon_threshold if is_cartoon else self.nsfw_threshold
-
-                # Apply threshold before forwarding visual detections downstream.
-                score = float(nsfw_score)
-                if score < threshold:
-                    continue
-
-                # Store media type hint for downstream use
-                media_type = "cartoon" if is_cartoon else "live_action"
-
-                # Binary-search to find exact boundaries
-                bad_start = self._binary_search_boundary(
-                    start_time, duration, backward=True,
-                    is_cartoon=is_cartoon, threshold=threshold,
-                    frames_dir=frames_dir,
-                )
-                bad_end = self._binary_search_boundary(
-                    start_time, duration, backward=False,
-                    is_cartoon=is_cartoon, threshold=threshold,
-                    frames_dir=frames_dir,
-                )
-
-                logger.info(
-                    f"  Refined bad segment: {bad_start:.2f}s - {bad_end:.2f}s "
-                    f"(original sample at {start_time}s, span={bad_end - bad_start:.2f}s)"
-                )
-
-                results.append({
-                    "time": bad_start,
-                    "type": "nudity",
-                    "score": score,
-                    "media_type": media_type,
-                    "is_cartoon": is_cartoon,
-                    "bad_start": bad_start,
-                    "bad_end": bad_end,
-                })
-
-        logger.info(f"Extracted {num_frames} frames, flagged {len(results)} as NSFW")
+        for i, timestamp in enumerate(
+            self._build_scan_timestamps(window[0], window[1], step, include_end=True)
+        ):
+            scan_result = self._scan_frame_at_timestamp(
+                timestamp=timestamp,
+                duration=duration,
+                phase="dense",
+                frames_dir=frames_dir,
+                label=f"w{window_index:03d}_{i:04d}",
+            )
+            if scan_result is not None:
+                results.append(scan_result)
         return results
+
+    def _build_dense_window_detection(
+        self,
+        *,
+        window: tuple[float, float],
+        dense_results: list[dict],
+        duration: float,
+        frames_dir: Path,
+    ) -> dict | None:
+        positive_results = [
+            result for result in dense_results
+            if result["classification"]["threshold_passed"]
+        ]
+        if len(positive_results) < self.min_positive_frames:
+            if dense_results:
+                logger.info(
+                    "Dense window %.2fs-%.2fs rejected with %d/%d final-pass frame(s).",
+                    window[0],
+                    window[1],
+                    len(positive_results),
+                    self.min_positive_frames,
+                )
+            return None
+
+        boundary_results = [
+            result for result in dense_results
+            if self._counts_for_dark_scene_boundary(result["classification"])
+        ]
+        if not boundary_results:
+            boundary_results = positive_results
+
+        first_positive = boundary_results[0]
+        last_positive = boundary_results[-1]
+        anchor = max(
+            positive_results,
+            key=lambda result: (
+                result["classification"]["score"],
+                result["classification"]["sd_confidence"],
+                result["classification"]["falcon_confidence"],
+            ),
+        )
+
+        fallback_start, fallback_end = self._fallback_detection_span(
+            window=window,
+            first_positive_time=first_positive["time"],
+            last_positive_time=last_positive["time"],
+        )
+        bad_start = self._binary_search_boundary(
+            first_positive["time"],
+            duration,
+            backward=True,
+            is_cartoon=first_positive["is_cartoon"],
+            threshold=first_positive["classification"]["threshold"],
+            frames_dir=frames_dir,
+            search_start=window[0],
+            search_end=window[1],
+        )
+        bad_end = self._binary_search_boundary(
+            last_positive["time"],
+            duration,
+            backward=False,
+            is_cartoon=last_positive["is_cartoon"],
+            threshold=last_positive["classification"]["threshold"],
+            frames_dir=frames_dir,
+            search_start=window[0],
+            search_end=window[1],
+        )
+        if bad_end <= bad_start:
+            bad_start, bad_end = fallback_start, fallback_end
+
+        logger.info(
+            "Dense window %.2fs-%.2fs confirmed mature span %.2fs-%.2fs with %d final-pass frame(s).",
+            window[0],
+            window[1],
+            bad_start,
+            bad_end,
+            len(positive_results),
+        )
+
+        classification = anchor["classification"]
+        return {
+            "time": bad_start,
+            "type": "nudity",
+            "score": classification["score"],
+            "media_type": anchor["media_type"],
+            "is_cartoon": anchor["is_cartoon"],
+            "bad_start": bad_start,
+            "bad_end": bad_end,
+            "sd_confidence": classification["sd_confidence"],
+            "falcon_confidence": classification["falcon_confidence"],
+            "skin_confidence": classification["skin_confidence"],
+            "skin_ratio": classification["skin_ratio"],
+            "max_contour_ratio": classification["max_contour_ratio"],
+            "triggered_by": list(classification["triggered_by"]),
+            "threshold": classification["threshold"],
+            "threshold_passed": classification["threshold_passed"],
+            "phase": "dense",
+            "candidate_window_start": round(window[0], 2),
+            "candidate_window_end": round(window[1], 2),
+            "positive_frames": len(positive_results),
+            "positive_timestamps": [round(result["time"], 2) for result in positive_results],
+        }
+
+    def _fallback_detection_span(
+        self,
+        *,
+        window: tuple[float, float],
+        first_positive_time: float,
+        last_positive_time: float,
+    ) -> tuple[float, float]:
+        half_step = 0.5 / self.dense_rescan_fps
+        start_time = max(window[0], first_positive_time - half_step)
+        end_time = min(window[1], last_positive_time + half_step)
+        if end_time <= start_time:
+            end_time = min(window[1], start_time + max(0.1, 1.0 / self.dense_rescan_fps))
+        return round(start_time, 2), round(end_time, 2)
+
+    @staticmethod
+    def _counts_for_dark_scene_boundary(classification: dict) -> bool:
+        if classification.get("threshold_passed"):
+            return True
+
+        return bool(
+            classification.get("brightened_rescue_applied")
+            and not classification.get("triggered_by")
+            and float(classification.get("score", 0.0)) >= float(classification.get("threshold", 0.0))
+        )
 
     def _binary_search_boundary(
         self,
@@ -336,6 +599,8 @@ class MovieAnalyzer:
         threshold: float,
         frames_dir: Path,
         precision: float = 0.1,
+        search_start: float | None = None,
+        search_end: float | None = None,
     ) -> float:
         """Binary-search for the exact boundary where content becomes bad/safe.
 
@@ -354,16 +619,20 @@ class MovieAnalyzer:
         Returns:
             The boundary time in seconds.
         """
+        search_start = 0.0 if search_start is None else max(0.0, float(search_start))
+        search_end = duration if search_end is None else min(float(duration), float(search_end))
+        known_bad_time = max(search_start, min(float(known_bad_time), search_end))
+
         if backward:
-            safe_bound = 0.0
+            safe_bound = search_start
             bad_bound = known_bad_time
         else:
             bad_bound = known_bad_time
-            safe_bound = duration
+            safe_bound = search_end
 
-        while (bad_bound - safe_bound) > precision:
+        while abs(safe_bound - bad_bound) > precision:
             probe_time = (safe_bound + bad_bound) / 2.0
-            probe_time = max(0.0, min(probe_time, duration))
+            probe_time = self._clamp_sample_time(probe_time, duration)
 
             frame_path = frames_dir / f"refine_{probe_time:.3f}.jpg"
             try:
@@ -374,9 +643,15 @@ class MovieAnalyzer:
             if not frame_path.exists():
                 break
 
-            nsfw_score, has_nsfw = self._classify_frame(frame_path)
-            probe_score = float(nsfw_score) if has_nsfw else 0.0
-            probe_is_bad = has_nsfw and probe_score >= threshold
+            classification = self._classify_frame_details(frame_path, threshold=threshold)
+            self._log_nudity_detection(
+                timestamp=probe_time,
+                classification=classification,
+                media_type="cartoon" if is_cartoon else "live_action",
+                is_cartoon=is_cartoon,
+                phase="refine",
+            )
+            probe_is_bad = classification["threshold_passed"]
 
             if backward:
                 # Searching backward: find where safe → bad transition happens
@@ -411,25 +686,264 @@ class MovieAnalyzer:
             capture_output=True,
         )
 
+    def _export_debug_contact_sheet(self, scan_results: list[dict], limit: int = 40) -> Path | None:
+        if not self.debug_contact_sheet or not scan_results:
+            return None
+
+        ranked = sorted(
+            scan_results,
+            key=lambda result: (
+                result["classification"]["score"],
+                result["classification"]["threshold_passed"],
+                result["classification"]["sd_confidence"],
+                result["classification"]["falcon_confidence"],
+            ),
+            reverse=True,
+        )[:limit]
+        output_path = self._resolve_debug_contact_sheet_path()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        gutter = 12
+        columns = 4
+        thumb_width = 280
+        thumb_height = 158
+        label_height = 62
+        header_height = 34
+        background = (18, 18, 18)
+        text_color = (240, 240, 240)
+        border_color = (80, 80, 80)
+        rows = int(np.ceil(len(ranked) / columns))
+        canvas_width = gutter + columns * (thumb_width + gutter)
+        canvas_height = header_height + gutter + rows * (thumb_height + label_height + gutter)
+        canvas = Image.new("RGB", (canvas_width, canvas_height), color=background)
+        draw = ImageDraw.Draw(canvas)
+        draw.text(
+            (gutter, 10),
+            f"{self.video_path.name} broad/dense top {len(ranked)} frames",
+            fill=text_color,
+        )
+
+        for index, result in enumerate(ranked):
+            row = index // columns
+            column = index % columns
+            left = gutter + column * (thumb_width + gutter)
+            top = header_height + gutter + row * (thumb_height + label_height + gutter)
+            frame_path = Path(result["frame_path"])
+            try:
+                image = Image.open(frame_path).convert("RGB")
+                preview = ImageOps.contain(image, (thumb_width, thumb_height))
+            except Exception:
+                preview = Image.new("RGB", (thumb_width, thumb_height), color=(45, 45, 45))
+
+            paste_left = left + ((thumb_width - preview.width) // 2)
+            paste_top = top + ((thumb_height - preview.height) // 2)
+            canvas.paste(preview, (paste_left, paste_top))
+            draw.rectangle(
+                (left, top, left + thumb_width - 1, top + thumb_height - 1),
+                outline=border_color,
+                width=1,
+            )
+
+            classification = result["classification"]
+            triggered_by = ",".join(classification.get("triggered_by", [])) or "none"
+            label = "\n".join(
+                [
+                    f"{result['time']:.2f}s [{result['phase']}] pass={classification['threshold_passed']}",
+                    (
+                        f"sd={classification['sd_confidence']:.2f} "
+                        f"falcon={classification['falcon_confidence']:.2f} "
+                        f"skin={classification['skin_confidence']:.2f}"
+                    ),
+                    f"triggered_by={triggered_by}",
+                ]
+            )
+            draw.multiline_text((left, top + thumb_height + 6), label, fill=text_color, spacing=3)
+
+        canvas.save(output_path, format="PNG")
+        logger.info("Saved debug contact sheet to: %s", output_path)
+        return output_path
+
+    def _resolve_debug_contact_sheet_path(self) -> Path:
+        if self.debug_contact_sheet is None:
+            raise ValueError("debug contact sheet path is not configured")
+        path = self.debug_contact_sheet
+        if not path.is_absolute():
+            try:
+                path.relative_to(self.output_dir)
+            except ValueError:
+                path = self.output_dir / path
+        if not path.suffix:
+            path = path.with_suffix(".png")
+        return path
+
+    def export_skin_diagnostics(
+        self,
+        timestamps: list[float],
+        output_dir: str | Path | None = None,
+    ) -> list[Path]:
+        """Save side-by-side skin-mask diagnostic PNGs for selected timestamps."""
+        if not self.video_path.exists():
+            raise FileNotFoundError(f"Video not found: {self.video_path}")
+
+        diagnostics_dir = Path(output_dir) if output_dir else self.output_dir / "skin_diagnostics"
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+
+        detector = self._get_skin_detector()
+        saved_paths = []
+        with tempfile.TemporaryDirectory(prefix="skin_diag_") as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            for index, raw_timestamp in enumerate(timestamps):
+                timestamp = max(0.0, float(raw_timestamp))
+                frame_path = temp_dir_path / f"skin_diag_{index:04d}.png"
+                self._extract_frame(timestamp, frame_path)
+                debug_data = detector.create_debug_visualization(frame_path)
+                if debug_data["original_rgb"] is None:
+                    raise RuntimeError(f"Failed to create skin diagnostics for {timestamp:.2f}s")
+
+                output_path = diagnostics_dir / f"skin_diag_{timestamp:07.2f}s.png"
+                panel = self._build_skin_diagnostic_panel(timestamp=timestamp, debug_data=debug_data)
+                panel.save(output_path, format="PNG")
+                logger.info(
+                    "Saved skin diagnostic %s (skin_ratio=%.3f contour=%.3f confidence=%.3f)",
+                    output_path,
+                    debug_data["skin_ratio"],
+                    debug_data["max_contour_ratio"],
+                    debug_data["confidence"],
+                )
+                saved_paths.append(output_path)
+
+        return saved_paths
+
+    def _build_skin_diagnostic_panel(self, *, timestamp: float, debug_data: dict) -> Image.Image:
+        panel_width = 360
+        panel_height = 240
+        gutter = 12
+        header_height = 52
+        label_height = 22
+        background = (20, 20, 20)
+        text_color = (240, 240, 240)
+
+        panels = [
+            ("Original", Image.fromarray(debug_data["original_rgb"])),
+            ("HSV Skin Mask", Image.fromarray(debug_data["mask_rgb"])),
+            ("Highlighted Regions", Image.fromarray(debug_data["highlighted_rgb"])),
+        ]
+
+        canvas_width = (panel_width * len(panels)) + (gutter * (len(panels) + 1))
+        canvas_height = header_height + label_height + panel_height + gutter
+        canvas = Image.new("RGB", (canvas_width, canvas_height), color=background)
+        draw = ImageDraw.Draw(canvas)
+        summary = (
+            f"timestamp={timestamp:.2f}s  "
+            f"skin_ratio={debug_data['skin_ratio']:.4f}  "
+            f"max_contour_ratio={debug_data['max_contour_ratio']:.4f}  "
+            f"skin_confidence={debug_data['confidence']:.4f}"
+        )
+        draw.text((gutter, 16), summary, fill=text_color)
+
+        top = header_height + label_height
+        for idx, (label, image) in enumerate(panels):
+            left = gutter + idx * (panel_width + gutter)
+            draw.text((left, header_height), label, fill=text_color)
+            resized = ImageOps.contain(image, (panel_width, panel_height))
+            paste_left = left + ((panel_width - resized.width) // 2)
+            paste_top = top + ((panel_height - resized.height) // 2)
+            canvas.paste(resized, (paste_left, paste_top))
+            draw.rectangle(
+                (left, top, left + panel_width - 1, top + panel_height - 1),
+                outline=(90, 90, 90),
+                width=1,
+            )
+
+        return canvas
+
     def _classify_frame(self, frame_path: Path) -> tuple[float, bool]:
-        """Run a single image through three NSFW checkers. Returns (confidence, has_nsfw_concept).
+        """Backward-compatible tuple API for frame classification.
 
-        Uses three models for maximum coverage:
-        1. Stable Diffusion Safety Checker (CLIP-based)
-        2. Falconsai ViT NSFW detector (ViT-based, 98% accuracy)
-        3. SAM 2 Skin Detector (segmentation + skin tone analysis)
+        Returns (confidence, threshold_passed) using the live-action threshold.
+        """
+        classification = self._classify_frame_details(frame_path, threshold=self.nsfw_threshold)
+        return classification["score"], classification["threshold_passed"]
 
-        Returns True if any model detects NSFW. Confidence is the max of all.
+    def _classify_frame_details(self, frame_path: Path, threshold: float) -> dict:
+        """Run a single image through two decision detectors plus skin diagnostics.
+
+        Stable Diffusion and Falcon determine the content decision. The HSV skin
+        detector only contributes debug metrics and logging fields.
         """
         image = Image.open(frame_path).convert("RGB")
+        sd_confidence, sd_has_nsfw, falcon_confidence = self._classify_decision_detectors_from_image(image)
+
+        # --- Checker 3: Skin Detector (HSV-based) ---
+        skin_confidence = 0.0
+        skin_has_nsfw = False
+        skin_ratio = 0.0
+        max_contour_ratio = 0.0
+        try:
+            skin_result = self._get_skin_detector().analyze_frame_details(frame_path)
+            skin_confidence = float(skin_result["confidence"])
+            skin_has_nsfw = bool(skin_result["has_nsfw"])
+            skin_ratio = float(skin_result["skin_ratio"])
+            max_contour_ratio = float(skin_result["max_contour_ratio"])
+        except Exception as e:
+            logger.warning(f"Skin detector failed: {e}")
+
+        mean_luma = self._mean_luma(image)
+        classification = self._combine_nudity_signals(
+            threshold=threshold,
+            sd_confidence=sd_confidence,
+            sd_has_nsfw=sd_has_nsfw,
+            falcon_confidence=falcon_confidence,
+            skin_confidence=skin_confidence,
+            skin_has_nsfw=skin_has_nsfw,
+            skin_ratio=skin_ratio,
+            max_contour_ratio=max_contour_ratio,
+        )
+        classification["mean_luma"] = round(mean_luma, 2)
+
+        rescue_applied = False
+        rescue_triggered_by: list[str] = []
+        if (
+            not classification["threshold_passed"]
+            and not classification["triggered_by"]
+            and mean_luma <= DARK_FRAME_LUMA_THRESHOLD
+            and skin_confidence >= DARK_SCENE_SKIN_GATE
+        ):
+            rescue_applied = True
+            boosted_image = ImageEnhance.Contrast(
+                ImageEnhance.Brightness(image).enhance(BRIGHTNESS_RESCUE_GAIN)
+            ).enhance(CONTRAST_RESCUE_GAIN)
+            rescue_sd_confidence, rescue_sd_has_nsfw, rescue_falcon_confidence = (
+                self._classify_decision_detectors_from_image(boosted_image)
+            )
+            rescue_result = self._combine_nudity_signals(
+                threshold=threshold,
+                sd_confidence=max(sd_confidence, rescue_sd_confidence),
+                sd_has_nsfw=bool(sd_has_nsfw or rescue_sd_has_nsfw),
+                falcon_confidence=max(falcon_confidence, rescue_falcon_confidence),
+                skin_confidence=skin_confidence,
+                skin_has_nsfw=skin_has_nsfw,
+                skin_ratio=skin_ratio,
+                max_contour_ratio=max_contour_ratio,
+            )
+            rescue_triggered_by = [
+                trigger for trigger in rescue_result["triggered_by"]
+                if trigger not in classification["triggered_by"]
+            ]
+            rescue_result["mean_luma"] = classification["mean_luma"]
+            classification = rescue_result
+
+        classification["brightened_rescue_applied"] = rescue_applied
+        classification["brightened_rescue_triggered_by"] = rescue_triggered_by
+        return classification
+
+    def _classify_decision_detectors_from_image(self, image: Image.Image) -> tuple[float, bool, float]:
+        """Run the decision detectors (Stable Diffusion + Falcon) on a PIL image."""
         image_array = np.array(image)
 
         import torch
 
-        # --- Checker 1: Stable Diffusion Safety Checker ---
-        safety_input = self.feature_extractor(
-            images=image, return_tensors="pt"
-        ).to(self._device)
+        safety_input = self.feature_extractor(images=image, return_tensors="pt").to(self._device)
 
         with torch.no_grad():
             feature_values, has_nsfw = self.safety_checker(
@@ -449,32 +963,101 @@ class MovieAnalyzer:
             else:
                 sd_confidence = 0.5
 
-        # --- Checker 2: Falconsai ViT NSFW detector ---
         falcon_confidence = 0.0
         try:
             falcon_inputs = self.nsfw_processor(images=image, return_tensors="pt").to(self._device)
             with torch.no_grad():
                 falcon_outputs = self.nsfw_model(**falcon_inputs)
                 falcon_probs = torch.softmax(falcon_outputs.logits, dim=-1)
-            # Class 1 = "nsfw", Class 0 = "normal"
             falcon_confidence = float(falcon_probs[0][1].item())
         except Exception as e:
             logger.warning(f"Falconsai checker failed: {e}")
 
-        # --- Checker 3: Skin Detector (HSV-based) ---
-        skin_confidence = 0.0
-        skin_has_nsfw = False
-        try:
-            skin_confidence, skin_has_nsfw = self.skin_detector.analyze_frame(frame_path)
-        except Exception as e:
-            logger.warning(f"Skin detector failed: {e}")
+        return sd_confidence, bool(has_nsfw[0]), falcon_confidence
 
-        # Combine: use max confidence, flag if any detects NSFW
-        combined_confidence = max(sd_confidence, falcon_confidence, skin_confidence)
-        # Skin detector is authoritative for older films where other classifiers fail
-        has_nsfw_combined = has_nsfw[0] or falcon_confidence > 0.3 or skin_has_nsfw
+    @staticmethod
+    def _mean_luma(image: Image.Image) -> float:
+        """Return average frame brightness on a 0-255 grayscale scale."""
+        grayscale = ImageOps.grayscale(image)
+        return float(np.asarray(grayscale, dtype=np.float32).mean())
 
-        return combined_confidence, has_nsfw_combined
+    def _combine_nudity_signals(
+        self,
+        *,
+        threshold: float,
+        sd_confidence: float,
+        sd_has_nsfw: bool,
+        falcon_confidence: float,
+        skin_confidence: float,
+        skin_has_nsfw: bool,
+        skin_ratio: float,
+        max_contour_ratio: float,
+    ) -> dict:
+        """Combine raw detector outputs into a single thresholded decision."""
+        triggered_by = []
+        if sd_has_nsfw:
+            triggered_by.append("stable_diffusion")
+        if falcon_confidence >= FALCON_TRIGGER_GATE:
+            triggered_by.append("falcon")
+
+        score = round(max(sd_confidence, falcon_confidence, skin_confidence), 4)
+        threshold = round(float(threshold), 4)
+        threshold_passed = bool(triggered_by) and score >= threshold
+        return {
+            "score": score,
+            "sd_confidence": round(float(sd_confidence), 4),
+            "falcon_confidence": round(float(falcon_confidence), 4),
+            "skin_confidence": round(float(skin_confidence), 4),
+            "skin_ratio": round(float(skin_ratio), 4),
+            "max_contour_ratio": round(float(max_contour_ratio), 4),
+            "triggered_by": triggered_by,
+            "threshold": threshold,
+            "threshold_passed": threshold_passed,
+            "sd_has_nsfw": bool(sd_has_nsfw),
+            "skin_has_nsfw": bool(skin_has_nsfw),
+        }
+
+    def _log_nudity_detection(
+        self,
+        *,
+        timestamp: float,
+        classification: dict,
+        media_type: str,
+        is_cartoon: bool,
+        phase: str = "broad",
+    ) -> None:
+        """Emit concise INFO logs for interesting frames and full DEBUG details."""
+        triggered_by = ",".join(classification.get("triggered_by", [])) or "none"
+        message = (
+            "Frame %.2fs [%s] %s media=%s cartoon=%s threshold=%.2f "
+            "scores(sd=%.3f falcon=%.3f skin=%.3f ratio=%.3f contour=%.3f) "
+            "triggers=%s pass=%s"
+        )
+        args = (
+            timestamp,
+            phase,
+            "PASS" if classification["threshold_passed"] else "fail",
+            media_type,
+            is_cartoon,
+            classification["threshold"],
+            classification["sd_confidence"],
+            classification["falcon_confidence"],
+            classification["skin_confidence"],
+            classification["skin_ratio"],
+            classification["max_contour_ratio"],
+            triggered_by,
+            classification["threshold_passed"],
+        )
+        logger.debug(message, *args)
+        if phase != "refine" and (
+            classification["threshold_passed"]
+            or classification["score"] >= self.candidate_threshold
+            or classification["triggered_by"]
+            or classification["sd_confidence"] >= classification["threshold"]
+            or classification["falcon_confidence"] >= FALCON_TRIGGER_GATE
+            or classification["skin_has_nsfw"]
+        ):
+            logger.info(message, *args)
 
     def _detect_cartoon(self, frame_path: Path) -> bool:
         """Heuristic to detect if a frame is cartoon/anime vs live-action.
@@ -1198,8 +1781,8 @@ def main():
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.6,
-        help="NSFW confidence threshold (default: 0.6)",
+        default=0.75,
+        help="NSFW confidence threshold (default: 0.75)",
     )
     parser.add_argument(
         "--cartoon-threshold",
@@ -1214,9 +1797,56 @@ def main():
         help="Frame extraction interval in seconds (default: 5)",
     )
     parser.add_argument(
+        "--scan-interval",
+        type=float,
+        default=None,
+        help="Broad-pass scan interval in seconds (default: use --interval)",
+    )
+    parser.add_argument(
+        "--candidate-threshold",
+        type=float,
+        default=0.25,
+        help="Broad-pass candidate score threshold (default: 0.25)",
+    )
+    parser.add_argument(
+        "--dense-rescan-fps",
+        type=float,
+        default=2.0,
+        help="Dense-pass rescan FPS inside candidate windows (default: 2.0)",
+    )
+    parser.add_argument(
+        "--dense-window-padding",
+        type=float,
+        default=5.0,
+        help="Padding around broad-pass candidate timestamps in seconds (default: 5.0)",
+    )
+    parser.add_argument(
+        "--min-positive-frames",
+        type=int,
+        default=2,
+        help="Dense-pass final-threshold frames required to confirm mature content (default: 2)",
+    )
+    parser.add_argument(
+        "--debug-contact-sheet",
+        default=None,
+        help="Optional output path for a broad/dense debug contact sheet",
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
         help="Output directory (default: same as video file)",
+    )
+    parser.add_argument(
+        "--skin-debug-timestamps",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Export HSV skin-mask diagnostics for the given timestamps and exit",
+    )
+    parser.add_argument(
+        "--skin-debug-dir",
+        default=None,
+        help="Output directory for --skin-debug-timestamps PNGs",
     )
     parser.add_argument(
         "--demo-branch",
@@ -1249,13 +1879,28 @@ def main():
         nsfw_threshold=args.threshold,
         cartoon_threshold=args.cartoon_threshold,
         frame_interval=args.interval,
-        load_models=not args.demo_branch,
+        scan_interval=args.scan_interval,
+        candidate_threshold=args.candidate_threshold,
+        dense_rescan_fps=args.dense_rescan_fps,
+        dense_window_padding=args.dense_window_padding,
+        min_positive_frames=args.min_positive_frames,
+        debug_contact_sheet=args.debug_contact_sheet,
+        load_models=not args.demo_branch and not args.skin_debug_timestamps,
         demo_filler_video=args.demo_filler_video,
         demo_filler_start=args.demo_filler_start,
         demo_filler_duration=args.demo_filler_duration,
     )
 
     try:
+        if args.skin_debug_timestamps:
+            outputs = analyzer.export_skin_diagnostics(
+                timestamps=args.skin_debug_timestamps,
+                output_dir=args.skin_debug_dir,
+            )
+            print("\nSkin diagnostics complete.")
+            for path in outputs:
+                print(f"   {path}")
+            return
         manifest = analyzer.analyze_demo_branch() if args.demo_branch else analyzer.analyze()
         print(f"\n✅ Analysis complete!")
         if analyzer.last_bvf_path:
