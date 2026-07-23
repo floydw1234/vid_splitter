@@ -100,8 +100,6 @@
         };
 
         var _loadingConfig = false;
-        var _loadAttempts = 0;
-        var _maxLoadAttempts = 5;
 
         function getElement(selector) {
             return document.querySelector(selector);
@@ -266,16 +264,6 @@
                 return Promise.resolve();
             }
 
-            if (!window.ApiClient) {
-                _loadAttempts++;
-                if (_loadAttempts < _maxLoadAttempts) {
-                    setTimeout(loadConfig, 300 * _loadAttempts);
-                } else {
-                    setTableLoading('ApiClient not available after retries', true);
-                }
-                return Promise.resolve();
-            }
-
             _loadingConfig = true;
             Dashboard.showLoadingMsg();
 
@@ -360,29 +348,37 @@
             return false;
         }
 
-        function onConfigPageShow() {
-            if (getElement('#smartBranchingConfigForm')) {
-                loadConfig();
+        function tryInit() {
+            var form = getElement('#smartBranchingConfigForm');
+            if (!form) {
+                return false;
             }
-        }
 
-        function onPageEvent(e) {
-            if (e && e.target && e.target.id === 'smartBranchingConfigPage') {
-                onConfigPageShow();
-            }
-        }
-
-        var page = getElement('#smartBranchingConfigPage');
-        var form = getElement('#smartBranchingConfigForm');
-        if (page) {
-            page.addEventListener('pageshow', onConfigPageShow);
-        }
-
-        document.addEventListener('viewbeforeshow', onPageEvent);
-        document.addEventListener('pageshow', onPageEvent);
-
-        if (form) {
             form.addEventListener('submit', saveConfig);
+
+            if (window.ApiClient) {
+                loadConfig();
+                return true;
+            }
+
+            return false;
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', tryInit);
+        } else {
+            tryInit();
+        }
+
+        if (!tryInit()) {
+            var pollCount = 0;
+            var pollMax = 20;
+            var pollId = setInterval(function () {
+                pollCount++;
+                if (tryInit() || pollCount >= pollMax) {
+                    clearInterval(pollId);
+                }
+            }, 200);
         }
     </script>
 </body>
