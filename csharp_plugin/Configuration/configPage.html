@@ -100,9 +100,18 @@
         };
 
         var _loadingConfig = false;
+        var _loadAttempts = 0;
+        var _maxLoadAttempts = 5;
 
         function getElement(selector) {
             return document.querySelector(selector);
+        }
+
+        function setTableLoading(message, isError) {
+            var tbody = getElement('#userProfileTableBody');
+            if (!tbody) return;
+            var color = isError ? 'color:red;' : '';
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 1em; ' + color + '">' + message + '</td></tr>';
         }
 
         function resolveProfile(birthday, sex, override) {
@@ -224,11 +233,16 @@
             tbody.innerHTML = '';
 
             if (!ApiClient || typeof ApiClient.getUsers !== 'function') {
-                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 1em; color:red;">API does not support user lookup</td></tr>';
+                setTableLoading('API does not support user lookup', true);
                 return Promise.resolve();
             }
 
-            return ApiClient.getUsers()
+            var usersPromise = ApiClient.getUsers();
+            var timeoutPromise = new Promise(function (_, reject) {
+                setTimeout(function () { reject(new Error('getUsers timed out after 5s')); }, 5000);
+            });
+
+            return Promise.race([usersPromise, timeoutPromise])
                 .then(function (response) {
                     var users = normalizeUsersResponse(response);
                     var stored = (savedConfig && savedConfig.UserProfiles) ? savedConfig.UserProfiles : {};
@@ -239,18 +253,26 @@
                     });
 
                     if (users.length === 0) {
-                        var row = document.createElement('tr');
-                        row.innerHTML = '<td colspan="5" style="text-align:center; padding: 1em;">No users found</td>';
-                        tbody.appendChild(row);
+                        setTableLoading('No users found', false);
                     }
                 })
-                .catch(function () {
-                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 1em; color:red;">Failed to load users</td></tr>';
+                .catch(function (err) {
+                    setTableLoading('Failed to load users: ' + (err && err.message ? err.message : 'unknown error'), true);
                 });
         }
 
         function loadConfig() {
-            if (_loadingConfig || !window.ApiClient) {
+            if (_loadingConfig) {
+                return Promise.resolve();
+            }
+
+            if (!window.ApiClient) {
+                _loadAttempts++;
+                if (_loadAttempts < _maxLoadAttempts) {
+                    setTimeout(loadConfig, 300 * _loadAttempts);
+                } else {
+                    setTableLoading('ApiClient not available after retries', true);
+                }
                 return Promise.resolve();
             }
 
@@ -272,8 +294,10 @@
 
                     return loadUsers(config);
                 })
-                .catch(function () {
-                    Dashboard.alert('Failed to load Smart Branching settings.');
+                .catch(function (err) {
+                    var msg = 'Failed to load Smart Branching settings: ' + (err && err.message ? err.message : 'unknown error');
+                    Dashboard.alert(msg);
+                    setTableLoading(msg, true);
                 })
                 .finally(function () {
                     Dashboard.hideLoadingMsg();
