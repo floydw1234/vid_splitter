@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Claims;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +12,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.SmartBranching;
@@ -38,14 +40,17 @@ public class SegmentServer : IMediaSourceProvider
     private readonly ILogger<SegmentServer> _logger;
     private readonly ProfileResolver _profileResolver;
     private readonly BvfManifestCache _bvfManifestCache = new();
+    private readonly IHttpContextAccessor? _httpContextAccessor;
 
     public SegmentServer(
         ILogger<SegmentServer> logger,
-        IApplicationPaths applicationPaths)
+        IApplicationPaths applicationPaths,
+        IHttpContextAccessor? httpContextAccessor = null)
     {
         ArgumentNullException.ThrowIfNull(applicationPaths);
         _logger = logger;
         _profileResolver = new ProfileResolver();
+        _httpContextAccessor = httpContextAccessor;
     }
 
     /// <summary>
@@ -155,6 +160,12 @@ public class SegmentServer : IMediaSourceProvider
                 return Task.FromResult(Enumerable.Empty<MediaSourceInfo>());
 
             var manifest = GetBvfManifest(bvfPath);
+            if (TryResolveRequestProfile(manifest, out var resolvedProfile))
+            {
+                return Task.FromResult<IEnumerable<MediaSourceInfo>>(
+                    new[] { CreateMediaSourceInfo(bvfPath, resolvedProfile, isAutomaticSelection: true) });
+            }
+
             var defaultProfile = GetDefaultProfile(manifest);
             var profiles = manifest.Profiles.Keys
                 .OrderByDescending(profile => string.Equals(profile, defaultProfile, StringComparison.Ordinal))
@@ -271,6 +282,56 @@ public class SegmentServer : IMediaSourceProvider
         return resolved;
     }
 
+    private bool TryResolveRequestProfile(BranchManifest manifest, out string profileKey)
+    {
+        profileKey = string.Empty;
+
+        var user = TryGetAuthenticatedUser();
+        if (user == null)
+            return false;
+
+        profileKey = _profileResolver.ResolveProfile(user, manifest);
+        return !string.IsNullOrEmpty(profileKey);
+    }
+
+    private UserDto? TryGetAuthenticatedUser()
+    {
+        var httpContext = _httpContextAccessor?.HttpContext;
+        if (httpContext == null)
+            return null;
+
+        var claimsPrincipal = httpContext.User;
+        if (claimsPrincipal?.Identity?.IsAuthenticated != true)
+            return null;
+
+        var userId = FirstNonEmpty(
+            claimsPrincipal.FindFirstValue(ClaimTypes.NameIdentifier),
+            claimsPrincipal.FindFirstValue("UserId"),
+            claimsPrincipal.FindFirstValue("user_id"),
+            httpContext.Request.Query["UserId"].FirstOrDefault(),
+            httpContext.Request.Query["userId"].FirstOrDefault());
+
+        if (!Guid.TryParse(userId, out var parsedUserId))
+            return null;
+
+        var userName = FirstNonEmpty(
+            claimsPrincipal.Identity?.Name,
+            claimsPrincipal.FindFirstValue(ClaimTypes.Name),
+            claimsPrincipal.FindFirstValue("JellyfinUserName"),
+            claimsPrincipal.FindFirstValue("username"));
+
+        return new UserDto
+        {
+            Id = parsedUserId,
+            Name = userName ?? parsedUserId.ToString(),
+        };
+    }
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+    }
+
     private static string GetDefaultProfile(BranchManifest manifest)
     {
         var configured = Plugin.Instance?.Configuration?.DefaultProfile;
@@ -286,13 +347,13 @@ public class SegmentServer : IMediaSourceProvider
         return manifest.Profiles.Keys.FirstOrDefault() ?? "adult";
     }
 
-    private static MediaSourceInfo CreateMediaSourceInfo(string bvfPath, string profileKey)
+    private static MediaSourceInfo CreateMediaSourceInfo(string bvfPath, string profileKey, bool isAutomaticSelection = false)
     {
         var token = EncodeMediaSourceToken(bvfPath, profileKey);
         return new MediaSourceInfo
         {
             Id = token,
-            Name = $"Smart Branch ({profileKey})",
+            Name = isAutomaticSelection ? $"Smart Branch (auto: {profileKey})" : $"Smart Branch ({profileKey})",
             Path = bvfPath,
             Container = "mp4",
             MediaStreams = new List<MediaStream>

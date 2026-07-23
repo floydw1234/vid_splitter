@@ -1,0 +1,33 @@
+{
+  "275_283": {
+    "exact_quartersec_passes": [
+      {
+        "offset_seconds": 2.5,
+        "global_seconds": 277.5,
+        "triggered_by": [
+          "stable_diffusion"
+        ],
+        "rescue_only": false
+      },
+      {
+        "offset_seconds": 3.0,
+        "global_seconds": 278.0,
+        "triggered_by": [
+          "stable_diffusion"
+        ],
+        "rescue_only": true
+      }
+    ],
+    "mean_luma_range": [
+      55.38,
+      61.99
+    ]
+  },
+  "290_300": {
+    "false_positive_sampled_passes": [],
+    "mean_luma_range": [
+      78.45,
+      158.59
+    ]
+  }
+}

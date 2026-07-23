@@ -117,7 +117,7 @@ Reserved manifest values: `mute`, `blur` (serialized for future use but rejected
 
 ### CLI Usage
 ```bash
-python analyze.py "path/to/movie.mp4" --model base --threshold 0.6 --interval 5
+python analyze.py "path/to/movie.mp4" --model base --threshold 0.75 --interval 5
 ```
 
 ## 4b. Marlin-2B Integration (Phase 1b — Alternative Analyzer Path)

@@ -137,12 +137,14 @@ using the packaged `.zip`:
 
 1. Place `Movie.bvf` alongside `Movie.mp4`.
 2. Rescan the library.
-3. Select the Smart Branch source for the desired profile when available.
+3. If Jellyfin provides an authenticated request user during source enumeration, the plugin auto-selects that user's resolved Smart Branch profile and exposes a single `Smart Branch (auto: profile)` source.
+4. If no authenticated user is available in the request context, the plugin falls back to exposing one Smart Branch source per BVF manifest profile.
 
 Jellyfin 10.9's `IMediaSourceProvider` playback hook does not pass the active
-user into `OpenMediaSource`. To keep playback deterministic, the plugin exposes
-one Smart Branch source per BVF manifest profile and encodes the selected profile
-in the media source open token.
+user into `OpenMediaSource`. To keep playback deterministic, the plugin resolves
+the authenticated request user during `GetMediaSources` when possible and encodes
+the selected profile in the media source open token. When no request user is
+available, it falls back to the previous per-profile source list.
 
 ## Verification
 

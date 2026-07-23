@@ -35,7 +35,7 @@
 
                         <div class="inputContainer">
                             <label class="inputLabel inputLabelUnfocused" for="nsfwThreshold">NSFW Confidence Threshold</label>
-                            <input is="emby-input" id="nsfwThreshold" name="nsfwThreshold" type="number" min="0" max="1" step="0.1" value="0.6" />
+                            <input is="emby-input" id="nsfwThreshold" name="nsfwThreshold" type="number" min="0" max="1" step="0.1" value="0.75" />
                             <div class="fieldDescription">Minimum confidence to flag a frame as NSFW</div>
                         </div>
 
@@ -266,7 +266,7 @@
 
                     getElement('#enableSmartBranching').checked = config.Enabled !== false;
                     getElement('#defaultProfile').value = config.DefaultProfile || 'adult';
-                    getElement('#nsfwThreshold').value = config.NsfwThreshold || 0.6;
+                    getElement('#nsfwThreshold').value = (config.NsfwThreshold !== undefined && config.NsfwThreshold !== null) ? config.NsfwThreshold : 0.75;
                     getElement('#fillerDirectory').value = config.FillerDirectory || 'smart_branching/filler';
                     getElement('#defaultAction').value = config.DefaultAction || 'swap';
 

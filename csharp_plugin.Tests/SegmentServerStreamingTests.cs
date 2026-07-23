@@ -3,14 +3,20 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Security.Claims;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Jellyfin.Plugin.SmartBranching;
+using Jellyfin.Plugin.SmartBranching.Configuration;
 using Jellyfin.Plugin.SmartBranching.Models;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Serialization;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 using ZstdSharp;
@@ -290,6 +296,71 @@ public class SegmentServerStreamingTests
         Assert.Equal("FILL", Encoding.UTF8.GetString(readBuffer, 0, bytesRead));
     }
 
+    [Fact]
+    public async Task GetMediaSources_WithAuthenticatedUser_ReturnsResolvedProfileOnly()
+    {
+        CreatePluginContext(BuildConfig(yearsAgo: 12, sex: "male"));
+
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 4000,
+              "profiles": {
+                "child": { "filters": {} },
+                "adult": { "filters": {} }
+              },
+              "segments": []
+            }
+            """;
+
+        using var bvfFile = CreateTempBvf(manifestJson, ("seg-001", "AAAA"));
+        var moviePath = Path.ChangeExtension((string)bvfFile, ".mp4");
+        File.WriteAllText(moviePath, "placeholder");
+
+        var httpContextAccessor = CreateAuthenticatedHttpContextAccessor(TestUserId, "kiddo");
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths(), httpContextAccessor);
+        var item = new Video { Path = moviePath };
+
+        var sources = (await server.GetMediaSources(item, CancellationToken.None)).ToList();
+
+        var source = Assert.Single(sources);
+        Assert.Equal("Smart Branch (auto: child)", source.Name);
+        Assert.Equal("child", DecodeProfileFromToken(source.OpenToken));
+    }
+
+    [Fact]
+    public async Task GetMediaSources_WithoutAuthenticatedUser_FallsBackToProfileList()
+    {
+        CreatePluginContext(BuildConfig(yearsAgo: 12, sex: "male"));
+
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 4000,
+              "profiles": {
+                "child": { "filters": {} },
+                "adult": { "filters": {} }
+              },
+              "segments": []
+            }
+            """;
+
+        using var bvfFile = CreateTempBvf(manifestJson, ("seg-001", "AAAA"));
+        var moviePath = Path.ChangeExtension((string)bvfFile, ".mp4");
+        File.WriteAllText(moviePath, "placeholder");
+
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths(), new HttpContextAccessor());
+        var item = new Video { Path = moviePath };
+
+        var sources = (await server.GetMediaSources(item, CancellationToken.None)).ToList();
+
+        Assert.Equal(2, sources.Count);
+        Assert.Contains(sources, source => source.Name == "Smart Branch (adult)");
+        Assert.Contains(sources, source => source.Name == "Smart Branch (child)");
+    }
+
     private static List<ResolvedSegment> InvokeResolveAllSegmentsForProfile(SegmentServer server, string bvfPath, string profileKey)
     {
         var method = typeof(SegmentServer).GetMethod(
@@ -315,10 +386,65 @@ public class SegmentServerStreamingTests
         return server.OpenMediaSource(token, new List<ILiveStream>(), CancellationToken.None).GetAwaiter().GetResult();
     }
 
-    private static SmartBranchingPlugin CreatePluginContext()
+    private static SmartBranchingPlugin CreatePluginContext(PluginConfiguration? configuration = null)
     {
-        return new SmartBranchingPlugin(new TestApplicationPaths(), new TestXmlSerializer());
+        var plugin = new SmartBranchingPlugin(new TestApplicationPaths(), new TestXmlSerializer());
+        if (configuration != null)
+        {
+            plugin.UpdateConfiguration(configuration);
+        }
+
+        return plugin;
     }
+
+    private static PluginConfiguration BuildConfig(int yearsAgo, string sex, string? profileOverride = null)
+    {
+        var userId = TestUserId.ToString();
+        return new PluginConfiguration
+        {
+            DefaultProfile = "adult",
+            UserProfiles = new Dictionary<string, UserBranchProfile>
+            {
+                [userId] = new()
+                {
+                    Birthday = DateOnly.FromDateTime(DateTime.UtcNow).AddYears(-yearsAgo).ToString("yyyy-MM-dd"),
+                    Sex = sex,
+                    ProfileOverride = profileOverride
+                }
+            }
+        };
+    }
+
+    private static HttpContextAccessor CreateAuthenticatedHttpContextAccessor(Guid userId, string userName)
+    {
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
+            new Claim(ClaimTypes.Name, userName),
+        };
+        var identity = new ClaimsIdentity(claims, authenticationType: "TestAuth");
+        var context = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(identity)
+        };
+
+        return new HttpContextAccessor { HttpContext = context };
+    }
+
+    private static string DecodeProfileFromToken(string token)
+    {
+        var parts = token.Split(':');
+        return Base64UrlDecode(parts[2]);
+    }
+
+    private static string Base64UrlDecode(string value)
+    {
+        var padded = value.Replace('-', '+').Replace('_', '/');
+        padded = padded.PadRight(padded.Length + ((4 - padded.Length % 4) % 4), '=');
+        return Encoding.UTF8.GetString(Convert.FromBase64String(padded));
+    }
+
+    private static readonly Guid TestUserId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     private static string EncodeMediaSourceToken(string bvfPath, string profileKey)
     {

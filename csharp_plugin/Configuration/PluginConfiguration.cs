@@ -39,7 +39,7 @@ public class PluginConfiguration : BasePluginConfiguration
         Enabled = true;
         DefaultProfile = "adult";
         FillerDirectory = "smart_branching/filler";
-        NsfwThreshold = 0.6f;
+        NsfwThreshold = 0.75f;
         DefaultAction = "swap";
         UserProfiles = new Dictionary<string, UserBranchProfile>();
     }
