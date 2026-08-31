@@ -14,6 +14,8 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
         serviceCollection.AddHttpContextAccessor();
-        serviceCollection.AddSingleton<IMediaSourceProvider, SegmentServer>();
+        // Register the concrete type so BvfHlsController can resolve the same instance.
+        serviceCollection.AddSingleton<SegmentServer>();
+        serviceCollection.AddSingleton<IMediaSourceProvider>(provider => provider.GetRequiredService<SegmentServer>());
     }
 }

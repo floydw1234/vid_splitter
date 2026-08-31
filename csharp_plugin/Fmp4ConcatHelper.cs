@@ -43,6 +43,31 @@ internal static class Fmp4ConcatHelper
         return (emitStart, emitEnd - emitStart);
     }
 
+    /// <summary>
+    /// Returns the byte range of the initialization portion (ftyp + moov) of a
+    /// self-contained fMP4 segment payload, or a zero-length range if the payload
+    /// is not fMP4.
+    /// </summary>
+    public static (long Start, long Length) GetInitRange(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 8 || !IsBoxType(payload, 0, "ftyp"))
+            return (0, 0);
+
+        var initLength = GetInitSegmentLength(payload);
+        if (initLength <= 0 || initLength > payload.Length)
+            return (0, 0);
+
+        return (0, initLength);
+    }
+
+    /// <summary>
+    /// Returns the byte range of the media portion (moof + mdat, excluding init
+    /// boxes and any trailing mfra) of a self-contained fMP4 segment payload.
+    /// Non-fMP4 payloads pass through unchanged.
+    /// </summary>
+    public static (long Start, long Length) GetMediaRange(ReadOnlySpan<byte> payload)
+        => GetEmitRange(payload, isFirstSegment: false, isLastSegment: false);
+
     private static long GetInitSegmentLength(ReadOnlySpan<byte> payload)
     {
         long offset = 0;

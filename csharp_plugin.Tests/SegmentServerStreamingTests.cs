@@ -235,6 +235,145 @@ public class SegmentServerStreamingTests
     }
 
     [Fact]
+    public async Task GetMediaSources_WithHostAndToken_ReturnsHlsStreamingSource()
+    {
+        CreatePluginContext(BuildConfig(yearsAgo: 12, sex: "male", profileOverride: "child"));
+
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 2000,
+              "profiles": {
+                "child": { "filters": {} }
+              },
+              "segments": [
+                {
+                  "id": "seg-001",
+                  "start_ms": 0,
+                  "end_ms": 1000,
+                  "tags": [],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": { "child": { "action": "play", "segment_id": "seg-001" } }
+                },
+                {
+                  "id": "seg-002",
+                  "start_ms": 1000,
+                  "end_ms": 2000,
+                  "tags": [],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": { "child": { "action": "play", "segment_id": "seg-002" } }
+                }
+              ]
+            }
+            """;
+
+        using var bvfFile = CreateTempBvf(
+            manifestJson,
+            ("seg-001", "payload-1"),
+            ("seg-002", "payload-2"));
+
+        var httpContextAccessor = CreateJellyfinHttpContextAccessor(
+            TestUserId,
+            accessToken: "secret-token",
+            host: "media.example.com:8096");
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths(), httpContextAccessor);
+
+        var sources = (await server.GetMediaSources(new Video { Path = bvfFile }, CancellationToken.None)).ToList();
+
+        var source = Assert.Single(sources);
+        Assert.Equal("Smart Branch (stream: child)", source.Name);
+        Assert.Equal(MediaBrowser.Model.MediaInfo.MediaProtocol.Http, source.Protocol);
+        Assert.StartsWith("http://media.example.com:8096/SmartBranching/hls/", source.Path, StringComparison.Ordinal);
+        Assert.Contains("/main.m3u8?api_key=secret-token", source.Path, StringComparison.Ordinal);
+        Assert.Equal(Jellyfin.Data.Enums.MediaStreamProtocol.hls, source.TranscodingSubProtocol);
+        Assert.True(source.SupportsDirectPlay);
+        Assert.False(source.SupportsDirectStream);
+        Assert.False(source.SupportsTranscoding);
+        Assert.False(source.RequiresOpening);
+        Assert.False(source.IsRemote);
+        Assert.Equal(2000L * TimeSpan.TicksPerMillisecond, source.RunTimeTicks);
+    }
+
+    [Fact]
+    public void HlsController_ServesPlaylistInitAndMediaSegments()
+    {
+        if (!FfmpegTestHelpers.IsAvailable())
+            return;
+
+        CreatePluginContext();
+
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 400,
+              "profiles": {
+                "child": { "filters": {} }
+              },
+              "segments": [
+                {
+                  "id": "seg-001",
+                  "start_ms": 0,
+                  "end_ms": 200,
+                  "tags": [],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": { "child": { "action": "play", "segment_id": "seg-001" } }
+                },
+                {
+                  "id": "seg-002",
+                  "start_ms": 200,
+                  "end_ms": 400,
+                  "tags": [],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": { "child": { "action": "play", "segment_id": "seg-002" } }
+                }
+              ]
+            }
+            """;
+
+        using var bvfFile = CreateTempBvf(
+            manifestJson,
+            ("seg-001", FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200))),
+            ("seg-002", FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200))));
+
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths());
+        var controller = new BvfHlsController(server, NullLogger<BvfHlsController>.Instance)
+        {
+            ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    Request = { QueryString = new QueryString("?api_key=tok") },
+                },
+            },
+        };
+        var token = EncodeMediaSourceToken(bvfFile, "child");
+
+        var playlistResult = Assert.IsType<Microsoft.AspNetCore.Mvc.ContentResult>(controller.GetPlaylist(token));
+        Assert.Equal("application/vnd.apple.mpegurl", playlistResult.ContentType);
+        Assert.Contains("#EXT-X-MAP:URI=\"init.mp4?api_key=tok\"", playlistResult.Content, StringComparison.Ordinal);
+        Assert.Contains("0.m4s?api_key=tok", playlistResult.Content, StringComparison.Ordinal);
+        Assert.Contains("1.m4s?api_key=tok", playlistResult.Content, StringComparison.Ordinal);
+        Assert.Contains("#EXT-X-ENDLIST", playlistResult.Content, StringComparison.Ordinal);
+
+        var initResult = Assert.IsType<Microsoft.AspNetCore.Mvc.FileContentResult>(controller.GetInitSegment(token));
+        Assert.Equal("ftyp", Encoding.ASCII.GetString(initResult.FileContents, 4, 4));
+
+        var segmentResult = Assert.IsType<Microsoft.AspNetCore.Mvc.FileContentResult>(controller.GetMediaSegment(token, 0));
+        Assert.True(segmentResult.FileContents.Length > 0);
+        var firstBoxType = Encoding.ASCII.GetString(segmentResult.FileContents, 4, 4);
+        Assert.NotEqual("ftyp", firstBoxType);
+
+        var outOfRange = controller.GetMediaSegment(token, 99);
+        Assert.IsType<Microsoft.AspNetCore.Mvc.NotFoundResult>(outOfRange);
+    }
+
+    [Fact]
     public async Task GetMediaSources_WithJellyfinUserIdClaim_ReturnsResolvedProfileOnly()
     {
         CreatePluginContext(BuildConfig(yearsAgo: 3, sex: "male", profileOverride: "adult"));
@@ -383,16 +522,27 @@ public class SegmentServerStreamingTests
         return config;
     }
 
-    private static HttpContextAccessor CreateJellyfinHttpContextAccessor(Guid userId)
+    private static HttpContextAccessor CreateJellyfinHttpContextAccessor(
+        Guid userId,
+        string? accessToken = null,
+        string? host = null)
     {
-        var claims = new[]
+        var claims = new List<Claim>
         {
             new Claim(SegmentServer.JellyfinUserIdClaimType, userId.ToString()),
         };
+        if (accessToken != null)
+            claims.Add(new Claim("Jellyfin-Token", accessToken));
+
         var context = new DefaultHttpContext
         {
             User = new ClaimsPrincipal(new ClaimsIdentity(claims)),
         };
+        if (host != null)
+        {
+            context.Request.Scheme = "http";
+            context.Request.Host = new HostString(host);
+        }
 
         return new HttpContextAccessor { HttpContext = context };
     }

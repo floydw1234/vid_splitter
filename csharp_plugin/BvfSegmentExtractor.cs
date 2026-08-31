@@ -51,6 +51,37 @@ internal static class BvfSegmentExtractor
         return paths;
     }
 
+    /// <summary>
+    /// Reads a single resolved segment payload (asset block minus its header)
+    /// directly from the BVF container.
+    /// </summary>
+    public static byte[] ReadSegmentPayload(string bvfPath, ResolvedSegment segment)
+    {
+        if (segment.DataLength < AssetBlockHeaderSize)
+        {
+            throw new InvalidDataException(
+                $"Resolved segment '{segment.SegmentId}' has invalid data length {segment.DataLength}.");
+        }
+
+        var payloadLength = checked((long)segment.DataLength - AssetBlockHeaderSize);
+        var payloadOffset = checked((long)segment.DataOffset + AssetBlockHeaderSize);
+
+        using var bvfStream = File.OpenRead(bvfPath);
+        bvfStream.Seek(payloadOffset, SeekOrigin.Begin);
+
+        var buffer = new byte[payloadLength];
+        var totalRead = 0;
+        while (totalRead < buffer.Length)
+        {
+            var read = bvfStream.Read(buffer, totalRead, buffer.Length - totalRead);
+            if (read <= 0)
+                throw new EndOfStreamException("Unexpected end of BVF segment payload.");
+            totalRead += read;
+        }
+
+        return buffer;
+    }
+
     private static void CopyBytes(Stream input, Stream output, long byteCount)
     {
         var buffer = new byte[81920];

@@ -14,6 +14,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Model.MediaInfo;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -142,6 +143,17 @@ public class SegmentServer : IMediaSourceProvider
             if (TryResolveRequestProfile(manifest, out var resolvedProfile))
             {
                 var resolvedSegments = ResolveAllSegmentsForProfile(bvfPath, resolvedProfile);
+                var streamingSource = TryCreateHlsMediaSource(
+                    bvfPath,
+                    resolvedProfile,
+                    resolvedSegments,
+                    durationTicks);
+                if (streamingSource != null)
+                {
+                    return Task.FromResult<IEnumerable<MediaSourceInfo>>(
+                        new[] { streamingSource });
+                }
+
                 return Task.FromResult<IEnumerable<MediaSourceInfo>>(
                     new[]
                     {
@@ -236,6 +248,96 @@ public class SegmentServer : IMediaSourceProvider
             throw;
         }
     }
+
+    /// <summary>
+    /// Builds a media source whose Path is an HLS playlist URL served by
+    /// <see cref="BvfHlsController"/>. Stock clients direct-play the playlist via
+    /// hls.js (MSE), so segments stream straight from the BVF container with no
+    /// remux and no duplicate cache files. Returns null when the request context
+    /// is missing the pieces needed to build a client-reachable URL.
+    /// </summary>
+    private MediaSourceInfo? TryCreateHlsMediaSource(
+        string bvfPath,
+        string profileKey,
+        IReadOnlyList<ResolvedSegment> resolvedSegments,
+        long? fallbackRunTimeTicks)
+    {
+        var httpContext = _httpContextAccessor?.HttpContext;
+        var request = httpContext?.Request;
+        if (request == null || !request.Host.HasValue || resolvedSegments.Count == 0)
+            return null;
+
+        var accessToken = TryGetRequestAccessToken(httpContext!);
+        if (string.IsNullOrEmpty(accessToken))
+            return null;
+
+        var token = EncodeMediaSourceToken(bvfPath, profileKey);
+        var playlistUrl =
+            $"{request.Scheme}://{request.Host.Value}{request.PathBase.Value}" +
+            $"/SmartBranching/hls/{token}/main.m3u8?api_key={Uri.EscapeDataString(accessToken)}";
+
+        var source = CreateMediaSourceInfo(
+            bvfPath,
+            profileKey,
+            resolvedSegments,
+            fallbackRunTimeTicks: fallbackRunTimeTicks);
+
+        source.Name = $"Smart Branch (stream: {profileKey})";
+        source.Path = playlistUrl;
+        source.Protocol = MediaProtocol.Http;
+        source.Container = "mp4";
+        // isHls() in jellyfin-web keys off TranscodingSubProtocol even for DirectPlay,
+        // which is what routes playback through hls.js instead of a plain <video> src.
+        source.TranscodingSubProtocol = MediaStreamProtocol.hls;
+        source.IsRemote = false;
+        source.Size = null;
+        source.SupportsProbing = false;
+        source.RequiresOpening = false;
+        source.RequiresClosing = false;
+        source.SupportsDirectPlay = true;
+        source.SupportsDirectStream = false;
+        source.SupportsTranscoding = false;
+
+        return source;
+    }
+
+    private static string? TryGetRequestAccessToken(HttpContext httpContext)
+    {
+        var fromClaim = httpContext.User?.FindFirstValue("Jellyfin-Token");
+        if (!string.IsNullOrWhiteSpace(fromClaim))
+            return fromClaim;
+
+        var fromQuery = FirstNonEmpty(
+            httpContext.Request.Query["api_key"].FirstOrDefault(),
+            httpContext.Request.Query["ApiKey"].FirstOrDefault());
+        if (!string.IsNullOrWhiteSpace(fromQuery))
+            return fromQuery;
+
+        var fromHeader = FirstNonEmpty(
+            httpContext.Request.Headers["X-Emby-Token"].FirstOrDefault(),
+            httpContext.Request.Headers["X-MediaBrowser-Token"].FirstOrDefault());
+        if (!string.IsNullOrWhiteSpace(fromHeader))
+            return fromHeader;
+
+        var authorization = httpContext.Request.Headers.Authorization.FirstOrDefault();
+        if (!string.IsNullOrEmpty(authorization))
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(
+                authorization,
+                "Token=\"?([^\",]+)\"?",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (match.Success)
+                return match.Groups[1].Value;
+        }
+
+        return null;
+    }
+
+    internal static (string BvfPath, string ProfileKey) DecodeToken(string token)
+        => DecodeMediaSourceToken(token);
+
+    internal List<ResolvedSegment> ResolveSegmentsForProfile(string bvfPath, string profileKey)
+        => ResolveAllSegmentsForProfile(bvfPath, profileKey);
 
     private List<ResolvedSegment> ResolveAllSegmentsForProfile(string bvfPath, string profileKey)
     {
