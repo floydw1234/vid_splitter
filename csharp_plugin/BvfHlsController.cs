@@ -84,24 +84,25 @@ public sealed class BvfHlsController : ControllerBase
         if (!TryResolve(token, out var bvfPath, out var profileKey, out var segments))
             return NotFound();
 
-        if (index < 0 || index >= segments.Count)
+        var timeline = TryGetTimeline(bvfPath, profileKey, segments);
+        if (index < 0 || timeline == null || index >= timeline.Parts.Count)
             return NotFound();
 
-        var payload = BvfSegmentExtractor.ReadSegmentPayload(bvfPath, segments[index]);
-        var (start, length) = Fmp4ConcatHelper.GetMediaRange(payload);
-        var media = Slice(payload, start, length);
+        var part = timeline.Parts[index];
+        if (part.ResolvedIndex < 0 || part.ResolvedIndex >= segments.Count)
+            return NotFound();
 
-        // Segment assets are encoded independently and all start at tfdt 0; shift
-        // this segment's fragments to its position on the continuous timeline.
-        var timeline = TryGetTimeline(bvfPath, profileKey, segments);
-        if (timeline != null)
-        {
-            Fmp4TimestampRewriter.ApplyTimestampOffset(
-                media,
-                timeline.Tracks,
-                timeline.CumulativeVideoTicks[index],
-                timeline.VideoTimescale);
-        }
+        var payload = BvfSegmentExtractor.ReadSegmentPayload(bvfPath, segments[part.ResolvedIndex]);
+        var media = Slice(payload, part.PayloadStart, part.PayloadLength);
+
+        Fmp4TimestampRewriter.ApplyTimestampOffset(
+            media,
+            timeline.Tracks,
+            part.TimestampOffsetTicks,
+            timeline.VideoTimescale);
+        Fmp4TimestampRewriter.SetMovieFragmentSequence(media, (uint)(index + 1));
+        if (part.ClampAudio)
+            Fmp4TimestampRewriter.ClampAudioToVideoDuration(media, timeline.Tracks);
 
         return File(media, SegmentContentType);
     }

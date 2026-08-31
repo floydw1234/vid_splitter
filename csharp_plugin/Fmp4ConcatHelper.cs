@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 
 namespace Jellyfin.Plugin.SmartBranching;
@@ -67,6 +68,51 @@ internal static class Fmp4ConcatHelper
     /// </summary>
     public static (long Start, long Length) GetMediaRange(ReadOnlySpan<byte> payload)
         => GetEmitRange(payload, isFirstSegment: false, isLastSegment: false);
+
+    /// <summary>
+    /// Splits a self-contained fMP4 payload into (moof + mdat) fragment ranges,
+    /// skipping the init boxes and any trailing mfra. Offsets are relative to
+    /// the start of <paramref name="payload"/>.
+    /// </summary>
+    public static IReadOnlyList<(int Start, int Length)> GetFragmentRanges(ReadOnlySpan<byte> payload)
+    {
+        var ranges = new List<(int Start, int Length)>();
+        var (_, initLength) = GetInitRange(payload);
+        var offset = (int)initLength;
+
+        while (offset + 8 <= payload.Length)
+        {
+            if (!TryReadBox(payload, offset, out var size, out var type))
+                break;
+
+            if (type == "mfra")
+                break;
+
+            if (type == "moof")
+            {
+                var start = offset;
+                var end = offset + (int)size;
+                var next = end;
+                if (TryReadBox(payload, next, out var nextSize, out var nextType) && nextType == "mdat")
+                    end = next + (int)nextSize;
+
+                ranges.Add((start, end - start));
+                offset = end;
+                continue;
+            }
+
+            offset += (int)size;
+        }
+
+        if (ranges.Count == 0)
+        {
+            var (mediaStart, mediaLength) = GetMediaRange(payload);
+            if (mediaLength > 0)
+                ranges.Add(((int)mediaStart, (int)mediaLength));
+        }
+
+        return ranges;
+    }
 
     private static long GetInitSegmentLength(ReadOnlySpan<byte> payload)
     {

@@ -98,6 +98,11 @@ public class Fmp4RangeTests
         Assert.Equal(initLength, mediaStart);
         Assert.True(mediaLength > 0, "expected a non-empty media range");
         Assert.True(mediaStart + mediaLength <= payload.Length);
+
+        var fragments = Fmp4ConcatHelper.GetFragmentRanges(payload);
+        Assert.NotEmpty(fragments);
+        Assert.Equal(mediaStart, fragments[0].Start);
+        Assert.Equal(mediaStart + mediaLength, fragments[^1].Start + fragments[^1].Length);
     }
 
     [Fact]
@@ -138,6 +143,34 @@ public class Fmp4TimestampRewriterTests
 
         Fmp4TimestampRewriter.ApplyTimestampOffset(media, tracks, durationTicks, video.Timescale);
         Assert.Equal(durationTicks, ReadFirstTfdt(media));
+
+        Fmp4TimestampRewriter.SetMovieFragmentSequence(media, 7);
+        Assert.Equal(7u, ReadFirstMfhdSequence(media));
+    }
+
+    internal static uint ReadFirstMfhdSequence(byte[] media)
+    {
+        var offset = 0;
+        while (offset + 8 <= media.Length)
+        {
+            var size = ReadUInt32(media, offset);
+            var type = Encoding.ASCII.GetString(media, offset + 4, 4);
+            if (type == "moof")
+            {
+                var inner = offset + 8;
+                while (inner + 8 <= offset + size)
+                {
+                    var innerSize = ReadUInt32(media, inner);
+                    if (Encoding.ASCII.GetString(media, inner + 4, 4) == "mfhd")
+                        return ReadUInt32(media, inner + 12);
+                    inner += (int)innerSize;
+                }
+            }
+
+            offset += (int)size;
+        }
+
+        throw new InvalidOperationException("no mfhd found");
     }
 
     internal static ulong ReadFirstTfdt(byte[] media)

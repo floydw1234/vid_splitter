@@ -10,6 +10,21 @@ namespace Jellyfin.Plugin.SmartBranching;
 /// durations per segment and the cumulative tfdt offsets used to stitch the
 /// independently-encoded segments into one continuous timeline.
 /// </summary>
+internal sealed class BvfHlsPart
+{
+    public required int ResolvedIndex { get; init; }
+
+    public required int PayloadStart { get; init; }
+
+    public required int PayloadLength { get; init; }
+
+    public required ulong TimestampOffsetTicks { get; init; }
+
+    public required double DurationSeconds { get; init; }
+
+    public required bool ClampAudio { get; init; }
+}
+
 internal sealed class BvfHlsTimeline
 {
     public required IReadOnlyList<Fmp4TimestampRewriter.TrackInfo> Tracks { get; init; }
@@ -18,10 +33,9 @@ internal sealed class BvfHlsTimeline
 
     public required uint VideoTimescale { get; init; }
 
-    /// <summary>Length is segment count + 1; entry i is the offset for segment i.</summary>
-    public required ulong[] CumulativeVideoTicks { get; init; }
+    public required IReadOnlyList<BvfHlsPart> Parts { get; init; }
 
-    public required double[] SegmentDurationsSeconds { get; init; }
+    public required IReadOnlyList<double> SegmentDurationsSeconds { get; init; }
 }
 
 /// <summary>
@@ -188,6 +202,216 @@ internal static class Fmp4TimestampRewriter
                     }
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Sets every mfhd sequence_number in <paramref name="media"/> to
+    /// <paramref name="sequenceNumber"/>. HLS/MSE parsers can stall when
+    /// independently-encoded fragments all restart at 1.
+    /// </summary>
+    public static void SetMovieFragmentSequence(byte[] media, uint sequenceNumber)
+    {
+        var span = media.AsSpan();
+        foreach (var (type, offset, size, headerSize) in WalkBoxes(span, 0, media.Length))
+        {
+            if (type != "moof")
+                continue;
+
+            foreach (var (childType, childOffset, _, _) in WalkBoxes(span, offset + headerSize, offset + size))
+            {
+                if (childType != "mfhd")
+                    continue;
+
+                BinaryPrimitives.WriteUInt32BigEndian(span.Slice(childOffset + 12, 4), sequenceNumber);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Shrinks trailing audio sample durations so audio does not extend past
+    /// video. Independently-encoded AAC is typically a few frames longer than
+    /// video; leaving that overlap in MSE makes the playhead follow audio while
+    /// video holds the last frame.
+    /// </summary>
+    public static void ClampAudioToVideoDuration(byte[] media, IReadOnlyList<TrackInfo> tracks)
+    {
+        var video = default(TrackInfo);
+        foreach (var track in tracks)
+        {
+            if (track.IsVideo)
+            {
+                video = track;
+                break;
+            }
+        }
+
+        if (video.TrackId == 0)
+            return;
+
+        var videoEnd = GetTrackEndTicks(media, video.TrackId);
+        if (videoEnd == 0)
+            return;
+
+        foreach (var track in tracks)
+        {
+            if (track.IsVideo || track.Timescale == 0)
+                continue;
+
+            var audioLimit = RescaleOffset(videoEnd, video.Timescale, track.Timescale);
+            TrimTrackEndTo(media, track.TrackId, audioLimit);
+        }
+    }
+
+    private static ulong GetTrackEndTicks(byte[] media, uint trackId)
+    {
+        ulong end = 0;
+        var span = media.AsSpan();
+        foreach (var (type, offset, size, headerSize) in WalkBoxes(span, 0, media.Length))
+        {
+            if (type != "moof")
+                continue;
+
+            foreach (var (childType, childOffset, childSize, childHeader) in WalkBoxes(span, offset + headerSize, offset + size))
+            {
+                if (childType != "traf")
+                    continue;
+
+                uint currentTrackId = 0;
+                ulong tfdt = 0;
+                uint defaultSampleDuration = 0;
+                ulong duration = 0;
+
+                foreach (var (trafChild, trafOffset, _, _) in WalkBoxes(span, childOffset + childHeader, childOffset + childSize))
+                {
+                    if (trafChild == "tfhd")
+                    {
+                        var flags = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(trafOffset + 8, 4)) & 0xFFFFFF;
+                        currentTrackId = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(trafOffset + 12, 4));
+                        var cursor = trafOffset + 16;
+                        if ((flags & 0x1) != 0)
+                            cursor += 8;
+                        if ((flags & 0x2) != 0)
+                            cursor += 4;
+                        if ((flags & 0x8) != 0)
+                            defaultSampleDuration = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(cursor, 4));
+                    }
+                    else if (trafChild == "tfdt")
+                    {
+                        var version = span[trafOffset + 8];
+                        tfdt = version == 1
+                            ? BinaryPrimitives.ReadUInt64BigEndian(span.Slice(trafOffset + 12, 8))
+                            : BinaryPrimitives.ReadUInt32BigEndian(span.Slice(trafOffset + 12, 4));
+                    }
+                    else if (trafChild == "trun" && currentTrackId == trackId)
+                    {
+                        duration += ReadTrunDuration(span, trafOffset, defaultSampleDuration);
+                    }
+                }
+
+                if (currentTrackId == trackId)
+                    end = Math.Max(end, tfdt + duration);
+            }
+        }
+
+        return end;
+    }
+
+    private static void TrimTrackEndTo(byte[] media, uint trackId, ulong limitTicks)
+    {
+        var end = GetTrackEndTicks(media, trackId);
+        if (end <= limitTicks)
+            return;
+
+        var extra = end - limitTicks;
+        var durationFields = new List<(int Offset, uint Duration)>();
+        var span = media.AsSpan();
+
+        foreach (var (type, offset, size, headerSize) in WalkBoxes(span, 0, media.Length))
+        {
+            if (type != "moof")
+                continue;
+
+            foreach (var (childType, childOffset, childSize, childHeader) in WalkBoxes(span, offset + headerSize, offset + size))
+            {
+                if (childType != "traf")
+                    continue;
+
+                uint currentTrackId = 0;
+
+                foreach (var (trafChild, trafOffset, _, _) in WalkBoxes(span, childOffset + childHeader, childOffset + childSize))
+                {
+                    if (trafChild == "tfhd")
+                    {
+                        currentTrackId = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(trafOffset + 12, 4));
+                    }
+                    else if (trafChild == "trun" && currentTrackId == trackId)
+                    {
+                        CollectTrunDurations(span, trafOffset, durationFields);
+                    }
+                }
+            }
+        }
+
+        for (var i = durationFields.Count - 1; i >= 0 && extra > 0; i--)
+        {
+            var (fieldOffset, duration) = durationFields[i];
+            if (duration == 0)
+                continue;
+
+            var reduce = extra < duration ? (uint)extra : duration;
+            BinaryPrimitives.WriteUInt32BigEndian(media.AsSpan(fieldOffset, 4), duration - reduce);
+            extra -= reduce;
+        }
+    }
+
+    private static ulong ReadTrunDuration(ReadOnlySpan<byte> span, int trunOffset, uint defaultSampleDuration)
+    {
+        var flags = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(trunOffset + 8, 4)) & 0xFFFFFF;
+        var sampleCount = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(trunOffset + 12, 4));
+        var cursor = trunOffset + 16;
+        if ((flags & 0x1) != 0)
+            cursor += 4;
+        if ((flags & 0x4) != 0)
+            cursor += 4;
+
+        if ((flags & 0x100) == 0)
+            return (ulong)defaultSampleDuration * sampleCount;
+
+        var perSample = 4
+            + (((flags & 0x200) != 0) ? 4 : 0)
+            + (((flags & 0x400) != 0) ? 4 : 0)
+            + (((flags & 0x800) != 0) ? 4 : 0);
+        ulong total = 0;
+        for (var i = 0; i < sampleCount; i++)
+            total += BinaryPrimitives.ReadUInt32BigEndian(span.Slice(cursor + i * perSample, 4));
+        return total;
+    }
+
+    private static void CollectTrunDurations(
+        ReadOnlySpan<byte> span,
+        int trunOffset,
+        List<(int Offset, uint Duration)> fields)
+    {
+        var flags = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(trunOffset + 8, 4)) & 0xFFFFFF;
+        var sampleCount = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(trunOffset + 12, 4));
+        var cursor = trunOffset + 16;
+        if ((flags & 0x1) != 0)
+            cursor += 4;
+        if ((flags & 0x4) != 0)
+            cursor += 4;
+
+        if ((flags & 0x100) == 0)
+            return;
+
+        var perSample = 4
+            + (((flags & 0x200) != 0) ? 4 : 0)
+            + (((flags & 0x400) != 0) ? 4 : 0)
+            + (((flags & 0x800) != 0) ? 4 : 0);
+        for (var i = 0; i < sampleCount; i++)
+        {
+            var fieldOffset = cursor + i * perSample;
+            fields.Add((fieldOffset, BinaryPrimitives.ReadUInt32BigEndian(span.Slice(fieldOffset, 4))));
         }
     }
 

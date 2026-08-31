@@ -370,29 +370,51 @@ public class SegmentServer : IMediaSourceProvider
         if (video.TrackId == 0)
             video = tracks[0];
 
-        var cumulativeTicks = new ulong[segments.Count + 1];
-        var durationsSeconds = new double[segments.Count];
+        var parts = new List<BvfHlsPart>();
+        ulong cumulativeTicks = 0;
 
-        using var bvfStream = File.OpenRead(bvfPath);
         for (var i = 0; i < segments.Count; i++)
         {
-            var payloadOffset = checked((long)segments[i].DataOffset + BvfSegmentExtractor.AssetBlockHeaderSize);
-            var payloadLength = checked((long)segments[i].DataLength - BvfSegmentExtractor.AssetBlockHeaderSize);
-            var ticks = Fmp4TimestampRewriter.SumTrackDurationTicks(bvfStream, payloadOffset, payloadLength, video.TrackId);
+            var payload = BvfSegmentExtractor.ReadSegmentPayload(bvfPath, segments[i]);
+            var fragments = Fmp4ConcatHelper.GetFragmentRanges(payload);
+            if (fragments.Count == 0)
+                continue;
 
-            cumulativeTicks[i + 1] = cumulativeTicks[i] + ticks;
-            durationsSeconds[i] = ticks > 0
-                ? ticks / (double)video.Timescale
-                : segments[i].DurationMs / 1000.0;
+            using var payloadStream = new MemoryStream(payload, writable: false);
+            var segmentOffset = cumulativeTicks;
+            for (var fragmentIndex = 0; fragmentIndex < fragments.Count; fragmentIndex++)
+            {
+                var (start, length) = fragments[fragmentIndex];
+                var ticks = Fmp4TimestampRewriter.SumTrackDurationTicks(payloadStream, start, length, video.TrackId);
+                var durationSeconds = ticks > 0
+                    ? ticks / (double)video.Timescale
+                    : segments[i].DurationMs / 1000.0 / Math.Max(fragments.Count, 1);
+
+                parts.Add(new BvfHlsPart
+                {
+                    ResolvedIndex = i,
+                    PayloadStart = start,
+                    PayloadLength = length,
+                    // Fragments inside one BVF asset already carry relative tfdt
+                    // values; only offset by prior assets so we don't double-count.
+                    TimestampOffsetTicks = segmentOffset,
+                    DurationSeconds = durationSeconds,
+                    ClampAudio = fragmentIndex == fragments.Count - 1,
+                });
+                cumulativeTicks += ticks;
+            }
         }
+
+        if (parts.Count == 0)
+            throw new InvalidDataException("No fMP4 fragments found in resolved BVF segments.");
 
         return new BvfHlsTimeline
         {
             Tracks = tracks,
             VideoTrackId = video.TrackId,
             VideoTimescale = video.Timescale,
-            CumulativeVideoTicks = cumulativeTicks,
-            SegmentDurationsSeconds = durationsSeconds,
+            Parts = parts,
+            SegmentDurationsSeconds = parts.Select(part => part.DurationSeconds).ToArray(),
         };
     }
 

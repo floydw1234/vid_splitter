@@ -28,17 +28,24 @@ internal static class BvfHlsPlaylistBuilder
         ArgumentNullException.ThrowIfNull(segments);
         querySuffix ??= string.Empty;
 
-        var durations = new double[segments.Count];
-        var maxDurationSeconds = 1.0;
-        for (var i = 0; i < segments.Count; i++)
+        IReadOnlyList<double> durations;
+        if (exactDurationsSeconds != null && exactDurationsSeconds.Count > 0)
         {
-            durations[i] = exactDurationsSeconds != null && i < exactDurationsSeconds.Count
-                ? exactDurationsSeconds[i]
-                : segments[i].DurationMs / 1000.0;
-            maxDurationSeconds = Math.Max(maxDurationSeconds, durations[i]);
+            durations = exactDurationsSeconds;
+        }
+        else
+        {
+            var fallback = new double[segments.Count];
+            for (var i = 0; i < segments.Count; i++)
+                fallback[i] = segments[i].DurationMs / 1000.0;
+            durations = fallback;
         }
 
-        var builder = new StringBuilder(segments.Count * 48 + 256);
+        var maxDurationSeconds = 1.0;
+        foreach (var duration in durations)
+            maxDurationSeconds = Math.Max(maxDurationSeconds, duration);
+
+        var builder = new StringBuilder(durations.Count * 48 + 256);
         builder.AppendLine("#EXTM3U");
         builder.AppendLine("#EXT-X-VERSION:7");
         builder.AppendLine("#EXT-X-PLAYLIST-TYPE:VOD");
@@ -49,7 +56,7 @@ internal static class BvfHlsPlaylistBuilder
         builder.AppendLine("#EXT-X-MEDIA-SEQUENCE:0");
         builder.Append("#EXT-X-MAP:URI=\"init.mp4").Append(querySuffix).AppendLine("\"");
 
-        for (var i = 0; i < segments.Count; i++)
+        for (var i = 0; i < durations.Count; i++)
         {
             builder.Append("#EXTINF:")
                 .Append(durations[i].ToString("0.######", CultureInfo.InvariantCulture))
