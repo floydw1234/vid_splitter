@@ -8,11 +8,11 @@
     "category": "General",
     "versions": [
       {
-        "version": "0.1.0.0",
+        "version": "0.2.0.0",
         "targetAbi": "10.9.0.0",
-        "sourceUrl": "https://example.invalid/smart-branching-0.1.0.0.zip",
-        "checksum": "294b7ac4dee349835c395e78bf0d172ad4088f1e66e163e7736f37edb31e750c",
-        "timestamp": "2026-06-16T12:47:13Z"
+        "sourceUrl": "https://example.invalid/smart-branching-0.2.0.0.zip",
+        "checksum": "aa78b05be9a58703748d7a8d2782c532cd4318840c1304db44c9287b0e8efe20",
+        "timestamp": "2026-08-31T17:34:38Z"
       }
     ]
   }

@@ -101,7 +101,7 @@ env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_bvf_muxer.py t
 
 ## Jellyfin Smoke
 
-Use the Jellyfin smoke workflow to verify the production path end to end: select a short real video, generate a sibling `.bvf`, validate it locally, refresh Jellyfin discovery, and confirm that Smart Branch sources are exposed and playback-ready.
+Use the Jellyfin smoke workflow to verify the production path end to end: select a short real video, generate a `.bvf` in the library folder, validate it locally, refresh Jellyfin discovery, and confirm that the `.bvf` appears as a library item with Smart Branch sources.
 
 Required environment variables:
 

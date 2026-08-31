@@ -32,9 +32,12 @@ if [ ! -d "${PLUGIN_DIR}" ]; then
     exit 1
 fi
 
-# Find old files
+PLUGIN_SUBDIR="${PLUGIN_DIR}/SmartBranching"
+mkdir -p "${PLUGIN_SUBDIR}"
+
+# Find old files (both root and subdirectory)
 OLD_FILES=()
-for f in "${PLUGIN_DIR}"/${PLUGIN_NAME}.*; do
+for f in "${PLUGIN_DIR}"/${PLUGIN_NAME}.* "${PLUGIN_SUBDIR}"/${PLUGIN_NAME}.*; do
     [ -e "$f" ] && OLD_FILES+=("$f")
 done
 
@@ -58,20 +61,20 @@ else
     echo "No existing plugin files found."
 fi
 
-# Copy new files
+# Copy new files into subdirectory
 echo ""
-echo "Installing new plugin files..."
-cp "${BUILD_DIR}/${PLUGIN_NAME}.dll" "${PLUGIN_DIR}/"
-cp "${BUILD_DIR}/${PLUGIN_NAME}.deps.json" "${PLUGIN_DIR}/"
+echo "Installing to: ${PLUGIN_SUBDIR}"
+cp "${BUILD_DIR}/${PLUGIN_NAME}.dll" "${PLUGIN_SUBDIR}/"
+cp "${BUILD_DIR}/${PLUGIN_NAME}.deps.json" "${PLUGIN_SUBDIR}/"
 
 # Copy ZstdSharp if present
 if [ -f "${BUILD_DIR}/ZstdSharp.dll" ]; then
-    cp "${BUILD_DIR}/ZstdSharp.dll" "${PLUGIN_DIR}/"
+    cp "${BUILD_DIR}/ZstdSharp.dll" "${PLUGIN_SUBDIR}/"
 fi
 
 echo ""
 echo "Installed:"
-ls -la "${PLUGIN_DIR}"/${PLUGIN_NAME}.*
+ls -la "${PLUGIN_SUBDIR}"/
 echo ""
 echo "=== Done ==="
 echo "Restart Jellyfin to apply changes."

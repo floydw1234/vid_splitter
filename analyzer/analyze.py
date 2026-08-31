@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 FALCON_TRIGGER_GATE = 0.5
 DARK_FRAME_LUMA_THRESHOLD = 70.0
-DARK_SCENE_SKIN_GATE = 0.75
 BRIGHTNESS_RESCUE_GAIN = 1.75
 CONTRAST_RESCUE_GAIN = 1.15
 
@@ -130,7 +129,6 @@ class MovieAnalyzer:
         self.demo_filler_start = max(0.0, demo_filler_start)
         self.demo_filler_duration = demo_filler_duration
         self.goldylocks_filler_video = (REPO_ROOT / "videos" / "goldylocks.mp4").resolve()
-        self.skin_detector = None
 
         if load_models:
             self._load_models()
@@ -162,17 +160,7 @@ class MovieAnalyzer:
             "Falconsai/nsfw_image_detection"
         )
 
-        self._get_skin_detector()
-
         logger.info("Models loaded. Ready to analyze.")
-
-    def _get_skin_detector(self):
-        if self.skin_detector is None:
-            logger.info("Loading Skin Detector (HSV-based)...")
-            from analyzer.skin_detector import SkinDetector
-
-            self.skin_detector = SkinDetector()
-        return self.skin_detector
 
     def analyze(self) -> dict:
         """Run the full analysis pipeline and return the manifest dict."""
@@ -552,9 +540,6 @@ class MovieAnalyzer:
             "bad_end": bad_end,
             "sd_confidence": classification["sd_confidence"],
             "falcon_confidence": classification["falcon_confidence"],
-            "skin_confidence": classification["skin_confidence"],
-            "skin_ratio": classification["skin_ratio"],
-            "max_contour_ratio": classification["max_contour_ratio"],
             "triggered_by": list(classification["triggered_by"]),
             "threshold": classification["threshold"],
             "threshold_passed": classification["threshold_passed"],
@@ -751,8 +736,7 @@ class MovieAnalyzer:
                     f"{result['time']:.2f}s [{result['phase']}] pass={classification['threshold_passed']}",
                     (
                         f"sd={classification['sd_confidence']:.2f} "
-                        f"falcon={classification['falcon_confidence']:.2f} "
-                        f"skin={classification['skin_confidence']:.2f}"
+                        f"falcon={classification['falcon_confidence']:.2f}"
                     ),
                     f"triggered_by={triggered_by}",
                 ]
@@ -776,87 +760,6 @@ class MovieAnalyzer:
             path = path.with_suffix(".png")
         return path
 
-    def export_skin_diagnostics(
-        self,
-        timestamps: list[float],
-        output_dir: str | Path | None = None,
-    ) -> list[Path]:
-        """Save side-by-side skin-mask diagnostic PNGs for selected timestamps."""
-        if not self.video_path.exists():
-            raise FileNotFoundError(f"Video not found: {self.video_path}")
-
-        diagnostics_dir = Path(output_dir) if output_dir else self.output_dir / "skin_diagnostics"
-        diagnostics_dir.mkdir(parents=True, exist_ok=True)
-
-        detector = self._get_skin_detector()
-        saved_paths = []
-        with tempfile.TemporaryDirectory(prefix="skin_diag_") as temp_dir:
-            temp_dir_path = Path(temp_dir)
-            for index, raw_timestamp in enumerate(timestamps):
-                timestamp = max(0.0, float(raw_timestamp))
-                frame_path = temp_dir_path / f"skin_diag_{index:04d}.png"
-                self._extract_frame(timestamp, frame_path)
-                debug_data = detector.create_debug_visualization(frame_path)
-                if debug_data["original_rgb"] is None:
-                    raise RuntimeError(f"Failed to create skin diagnostics for {timestamp:.2f}s")
-
-                output_path = diagnostics_dir / f"skin_diag_{timestamp:07.2f}s.png"
-                panel = self._build_skin_diagnostic_panel(timestamp=timestamp, debug_data=debug_data)
-                panel.save(output_path, format="PNG")
-                logger.info(
-                    "Saved skin diagnostic %s (skin_ratio=%.3f contour=%.3f confidence=%.3f)",
-                    output_path,
-                    debug_data["skin_ratio"],
-                    debug_data["max_contour_ratio"],
-                    debug_data["confidence"],
-                )
-                saved_paths.append(output_path)
-
-        return saved_paths
-
-    def _build_skin_diagnostic_panel(self, *, timestamp: float, debug_data: dict) -> Image.Image:
-        panel_width = 360
-        panel_height = 240
-        gutter = 12
-        header_height = 52
-        label_height = 22
-        background = (20, 20, 20)
-        text_color = (240, 240, 240)
-
-        panels = [
-            ("Original", Image.fromarray(debug_data["original_rgb"])),
-            ("HSV Skin Mask", Image.fromarray(debug_data["mask_rgb"])),
-            ("Highlighted Regions", Image.fromarray(debug_data["highlighted_rgb"])),
-        ]
-
-        canvas_width = (panel_width * len(panels)) + (gutter * (len(panels) + 1))
-        canvas_height = header_height + label_height + panel_height + gutter
-        canvas = Image.new("RGB", (canvas_width, canvas_height), color=background)
-        draw = ImageDraw.Draw(canvas)
-        summary = (
-            f"timestamp={timestamp:.2f}s  "
-            f"skin_ratio={debug_data['skin_ratio']:.4f}  "
-            f"max_contour_ratio={debug_data['max_contour_ratio']:.4f}  "
-            f"skin_confidence={debug_data['confidence']:.4f}"
-        )
-        draw.text((gutter, 16), summary, fill=text_color)
-
-        top = header_height + label_height
-        for idx, (label, image) in enumerate(panels):
-            left = gutter + idx * (panel_width + gutter)
-            draw.text((left, header_height), label, fill=text_color)
-            resized = ImageOps.contain(image, (panel_width, panel_height))
-            paste_left = left + ((panel_width - resized.width) // 2)
-            paste_top = top + ((panel_height - resized.height) // 2)
-            canvas.paste(resized, (paste_left, paste_top))
-            draw.rectangle(
-                (left, top, left + panel_width - 1, top + panel_height - 1),
-                outline=(90, 90, 90),
-                width=1,
-            )
-
-        return canvas
-
     def _classify_frame(self, frame_path: Path) -> tuple[float, bool]:
         """Backward-compatible tuple API for frame classification.
 
@@ -866,27 +769,12 @@ class MovieAnalyzer:
         return classification["score"], classification["threshold_passed"]
 
     def _classify_frame_details(self, frame_path: Path, threshold: float) -> dict:
-        """Run a single image through two decision detectors plus skin diagnostics.
+        """Run a single image through the two decision detectors.
 
-        Stable Diffusion and Falcon determine the content decision. The HSV skin
-        detector only contributes debug metrics and logging fields.
+        Stable Diffusion and Falcon determine the content decision.
         """
         image = Image.open(frame_path).convert("RGB")
         sd_confidence, sd_has_nsfw, falcon_confidence = self._classify_decision_detectors_from_image(image)
-
-        # --- Checker 3: Skin Detector (HSV-based) ---
-        skin_confidence = 0.0
-        skin_has_nsfw = False
-        skin_ratio = 0.0
-        max_contour_ratio = 0.0
-        try:
-            skin_result = self._get_skin_detector().analyze_frame_details(frame_path)
-            skin_confidence = float(skin_result["confidence"])
-            skin_has_nsfw = bool(skin_result["has_nsfw"])
-            skin_ratio = float(skin_result["skin_ratio"])
-            max_contour_ratio = float(skin_result["max_contour_ratio"])
-        except Exception as e:
-            logger.warning(f"Skin detector failed: {e}")
 
         mean_luma = self._mean_luma(image)
         classification = self._combine_nudity_signals(
@@ -894,10 +782,6 @@ class MovieAnalyzer:
             sd_confidence=sd_confidence,
             sd_has_nsfw=sd_has_nsfw,
             falcon_confidence=falcon_confidence,
-            skin_confidence=skin_confidence,
-            skin_has_nsfw=skin_has_nsfw,
-            skin_ratio=skin_ratio,
-            max_contour_ratio=max_contour_ratio,
         )
         classification["mean_luma"] = round(mean_luma, 2)
 
@@ -907,7 +791,6 @@ class MovieAnalyzer:
             not classification["threshold_passed"]
             and not classification["triggered_by"]
             and mean_luma <= DARK_FRAME_LUMA_THRESHOLD
-            and skin_confidence >= DARK_SCENE_SKIN_GATE
         ):
             rescue_applied = True
             boosted_image = ImageEnhance.Contrast(
@@ -921,10 +804,6 @@ class MovieAnalyzer:
                 sd_confidence=max(sd_confidence, rescue_sd_confidence),
                 sd_has_nsfw=bool(sd_has_nsfw or rescue_sd_has_nsfw),
                 falcon_confidence=max(falcon_confidence, rescue_falcon_confidence),
-                skin_confidence=skin_confidence,
-                skin_has_nsfw=skin_has_nsfw,
-                skin_ratio=skin_ratio,
-                max_contour_ratio=max_contour_ratio,
             )
             rescue_triggered_by = [
                 trigger for trigger in rescue_result["triggered_by"]
@@ -988,10 +867,6 @@ class MovieAnalyzer:
         sd_confidence: float,
         sd_has_nsfw: bool,
         falcon_confidence: float,
-        skin_confidence: float,
-        skin_has_nsfw: bool,
-        skin_ratio: float,
-        max_contour_ratio: float,
     ) -> dict:
         """Combine raw detector outputs into a single thresholded decision."""
         triggered_by = []
@@ -1000,21 +875,17 @@ class MovieAnalyzer:
         if falcon_confidence >= FALCON_TRIGGER_GATE:
             triggered_by.append("falcon")
 
-        score = round(max(sd_confidence, falcon_confidence, skin_confidence), 4)
+        score = round(max(sd_confidence, falcon_confidence), 4)
         threshold = round(float(threshold), 4)
         threshold_passed = bool(triggered_by) and score >= threshold
         return {
             "score": score,
             "sd_confidence": round(float(sd_confidence), 4),
             "falcon_confidence": round(float(falcon_confidence), 4),
-            "skin_confidence": round(float(skin_confidence), 4),
-            "skin_ratio": round(float(skin_ratio), 4),
-            "max_contour_ratio": round(float(max_contour_ratio), 4),
             "triggered_by": triggered_by,
             "threshold": threshold,
             "threshold_passed": threshold_passed,
             "sd_has_nsfw": bool(sd_has_nsfw),
-            "skin_has_nsfw": bool(skin_has_nsfw),
         }
 
     def _log_nudity_detection(
@@ -1030,7 +901,7 @@ class MovieAnalyzer:
         triggered_by = ",".join(classification.get("triggered_by", [])) or "none"
         message = (
             "Frame %.2fs [%s] %s media=%s cartoon=%s threshold=%.2f "
-            "scores(sd=%.3f falcon=%.3f skin=%.3f ratio=%.3f contour=%.3f) "
+            "scores(sd=%.3f falcon=%.3f) "
             "triggers=%s pass=%s"
         )
         args = (
@@ -1042,9 +913,6 @@ class MovieAnalyzer:
             classification["threshold"],
             classification["sd_confidence"],
             classification["falcon_confidence"],
-            classification["skin_confidence"],
-            classification["skin_ratio"],
-            classification["max_contour_ratio"],
             triggered_by,
             classification["threshold_passed"],
         )
@@ -1055,7 +923,6 @@ class MovieAnalyzer:
             or classification["triggered_by"]
             or classification["sd_confidence"] >= classification["threshold"]
             or classification["falcon_confidence"] >= FALCON_TRIGGER_GATE
-            or classification["skin_has_nsfw"]
         ):
             logger.info(message, *args)
 
@@ -1837,18 +1704,6 @@ def main():
         help="Output directory (default: same as video file)",
     )
     parser.add_argument(
-        "--skin-debug-timestamps",
-        type=float,
-        nargs="+",
-        default=None,
-        help="Export HSV skin-mask diagnostics for the given timestamps and exit",
-    )
-    parser.add_argument(
-        "--skin-debug-dir",
-        default=None,
-        help="Output directory for --skin-debug-timestamps PNGs",
-    )
-    parser.add_argument(
         "--demo-branch",
         action="store_true",
         help="Create a deterministic safe/mature/safe BVF without loading ML models",
@@ -1885,22 +1740,13 @@ def main():
         dense_window_padding=args.dense_window_padding,
         min_positive_frames=args.min_positive_frames,
         debug_contact_sheet=args.debug_contact_sheet,
-        load_models=not args.demo_branch and not args.skin_debug_timestamps,
+        load_models=not args.demo_branch,
         demo_filler_video=args.demo_filler_video,
         demo_filler_start=args.demo_filler_start,
         demo_filler_duration=args.demo_filler_duration,
     )
 
     try:
-        if args.skin_debug_timestamps:
-            outputs = analyzer.export_skin_diagnostics(
-                timestamps=args.skin_debug_timestamps,
-                output_dir=args.skin_debug_dir,
-            )
-            print("\nSkin diagnostics complete.")
-            for path in outputs:
-                print(f"   {path}")
-            return
         manifest = analyzer.analyze_demo_branch() if args.demo_branch else analyzer.analyze()
         print(f"\n✅ Analysis complete!")
         if analyzer.last_bvf_path:

@@ -213,7 +213,13 @@ def test_package_command_fails_when_declared_zstd_artifact_is_missing():
 def test_package_command_fails_when_metadata_versions_do_not_match():
     build_yaml_path = _repo_root() / "csharp_plugin" / "build.yaml"
     original_text = build_yaml_path.read_text(encoding="utf-8")
-    mutated_text = original_text.replace('version: "0.1.0.0"', 'version: "0.1.0.1"', 1)
+    current_version = _read_build_yaml()["version"]
+    mutated_version = "9.9.9.9" if current_version != "9.9.9.9" else "9.9.9.8"
+    mutated_text = original_text.replace(
+        f'version: "{current_version}"',
+        f'version: "{mutated_version}"',
+        1,
+    )
 
     assert mutated_text != original_text, "Expected to mutate build.yaml version for the test."
 

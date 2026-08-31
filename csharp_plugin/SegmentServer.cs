@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.SmartBranching.Models;
@@ -12,6 +14,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.MediaInfo;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
@@ -19,17 +22,11 @@ namespace Jellyfin.Plugin.SmartBranching;
 
 /// <summary>
 /// Serves resolved video segments from BVF files through Jellyfin's video pipeline.
-/// 
-/// Architecture:
-/// 1. User clicks "Play" on a movie
-/// 2. Jellyfin asks this provider for media sources
-/// 3. We expose one Smart Branch source per BVF profile
-/// 4. We serve the resolved segments through Jellyfin's streaming pipeline
-/// 5. Segment actions are read from the BVF manifest
 /// </summary>
 public class SegmentServer : IMediaSourceProvider
 {
     private const string TokenPrefix = "smart-branch";
+    internal const string JellyfinUserIdClaimType = "Jellyfin-UserId";
     private static readonly HashSet<string> RuntimeSupportedActions = new(StringComparer.OrdinalIgnoreCase)
     {
         "play",
@@ -40,6 +37,7 @@ public class SegmentServer : IMediaSourceProvider
     private readonly ILogger<SegmentServer> _logger;
     private readonly ProfileResolver _profileResolver;
     private readonly BvfManifestCache _bvfManifestCache = new();
+    private readonly BvfPlaybackRemuxer _playbackRemuxer;
     private readonly IHttpContextAccessor? _httpContextAccessor;
 
     public SegmentServer(
@@ -51,11 +49,11 @@ public class SegmentServer : IMediaSourceProvider
         _logger = logger;
         _profileResolver = new ProfileResolver();
         _httpContextAccessor = httpContextAccessor;
+        _playbackRemuxer = new BvfPlaybackRemuxer(
+            logger,
+            Path.Combine(applicationPaths.CachePath, "smart-branching"));
     }
 
-    /// <summary>
-    /// Gets or creates a BVF manifest for a movie, with caching.
-    /// </summary>
     private BranchManifest GetBvfManifest(string bvfPath)
     {
         try
@@ -85,34 +83,30 @@ public class SegmentServer : IMediaSourceProvider
         }
     }
 
-    /// <summary>
-    /// Clears all caches (call when library changes).
-    /// </summary>
     public void ClearCache()
     {
         _bvfManifestCache.Clear();
-        _logger.LogInformation("BVF manifest cache cleared");
+        _playbackRemuxer.ClearCache();
+        _logger.LogInformation("BVF manifest and playback caches cleared");
     }
 
-    /// <summary>
-    /// Finds the BVF file for a given movie path.
-    /// </summary>
-    public string? FindBvfFile(string moviePath)
+    public string? FindBvfFile(string itemPath)
     {
-        var dir = Path.GetDirectoryName(moviePath);
+        if (string.IsNullOrEmpty(itemPath))
+            return null;
+
+        if (BvfFormatRegistration.IsBvfPath(itemPath))
+            return File.Exists(itemPath) ? itemPath : null;
+
+        var dir = Path.GetDirectoryName(itemPath);
         if (dir == null)
             return null;
 
-        var stem = Path.GetFileNameWithoutExtension(moviePath);
-        var bvfPath = Path.Combine(dir, stem + ".bvf");
-
+        var stem = Path.GetFileNameWithoutExtension(itemPath);
+        var bvfPath = Path.Combine(dir, stem + BvfFormatRegistration.Extension);
         return File.Exists(bvfPath) ? bvfPath : null;
     }
 
-    /// <summary>
-    /// Resolves all segments for a movie and user profile.
-    /// Returns a list of resolved segments with actual file paths.
-    /// </summary>
     public List<ResolvedSegment> ResolveAllSegments(string bvfPath, UserDto user)
     {
         var manifest = GetBvfManifest(bvfPath);
@@ -120,27 +114,10 @@ public class SegmentServer : IMediaSourceProvider
         return ResolveAllSegmentsForProfile(bvfPath, profileKey);
     }
 
-    /// <summary>
-    /// Checks if a movie has an associated BVF file.
-    /// </summary>
-    public bool HasBvfFile(string moviePath)
-    {
-        return FindBvfFile(moviePath) != null;
-    }
+    public bool HasBvfFile(string moviePath) => FindBvfFile(moviePath) != null;
 
-    /// <summary>
-    /// Gets the manifest for a movie without caching (for admin/debug).
-    /// </summary>
-    public BranchManifest GetManifestRaw(string bvfPath)
-    {
-        return GetBvfManifest(bvfPath);
-    }
+    public BranchManifest GetManifestRaw(string bvfPath) => GetBvfManifest(bvfPath);
 
-    /// <summary>
-    /// Provides media sources for BVF content.
-    /// When a movie has a .bvf file, we add one "Smart Branch" source per
-    /// manifest profile. The chosen profile is encoded in the OpenToken.
-    /// </summary>
     public Task<IEnumerable<MediaSourceInfo>> GetMediaSources(
         BaseItem item,
         CancellationToken cancellationToken)
@@ -153,17 +130,28 @@ public class SegmentServer : IMediaSourceProvider
 
         try
         {
-            var moviePath = item.Path;
-            var bvfPath = FindBvfFile(moviePath);
-
+            var bvfPath = FindBvfFile(item.Path);
             if (bvfPath == null)
                 return Task.FromResult(Enumerable.Empty<MediaSourceInfo>());
 
             var manifest = GetBvfManifest(bvfPath);
+            long? durationTicks = item.RunTimeTicks;
+            if (durationTicks is null or <= 0 && manifest.DurationSeconds > 0)
+                durationTicks = (long)(manifest.DurationSeconds * TimeSpan.TicksPerSecond);
+
             if (TryResolveRequestProfile(manifest, out var resolvedProfile))
             {
+                var resolvedSegments = ResolveAllSegmentsForProfile(bvfPath, resolvedProfile);
                 return Task.FromResult<IEnumerable<MediaSourceInfo>>(
-                    new[] { CreateMediaSourceInfo(bvfPath, resolvedProfile, isAutomaticSelection: true) });
+                    new[]
+                    {
+                        CreateMediaSourceInfo(
+                            bvfPath,
+                            resolvedProfile,
+                            resolvedSegments,
+                            isAutomaticSelection: true,
+                            fallbackRunTimeTicks: durationTicks)
+                    });
             }
 
             var defaultProfile = GetDefaultProfile(manifest);
@@ -171,7 +159,11 @@ public class SegmentServer : IMediaSourceProvider
                 .OrderByDescending(profile => string.Equals(profile, defaultProfile, StringComparison.Ordinal))
                 .ThenBy(profile => profile, StringComparer.Ordinal)
                 .DefaultIfEmpty(defaultProfile)
-                .Select(profile => CreateMediaSourceInfo(bvfPath, profile));
+                .Select(profile => CreateMediaSourceInfo(
+                    bvfPath,
+                    profile,
+                    ResolveAllSegmentsForProfile(bvfPath, profile),
+                    fallbackRunTimeTicks: durationTicks));
 
             return Task.FromResult<IEnumerable<MediaSourceInfo>>(profiles.ToList());
         }
@@ -182,12 +174,7 @@ public class SegmentServer : IMediaSourceProvider
         }
     }
 
-    /// <summary>
-    /// Opens the selected BVF media source. Jellyfin's IMediaSourceProvider API
-    /// does not pass the requesting user into this call, so the profile is encoded
-    /// in the media source id generated by <see cref="GetMediaSources"/>.
-    /// </summary>
-    public Task<ILiveStream> OpenMediaSource(
+    public async Task<ILiveStream> OpenMediaSource(
         string openToken,
         List<ILiveStream> currentLiveStreams,
         CancellationToken cancellationToken)
@@ -205,10 +192,43 @@ public class SegmentServer : IMediaSourceProvider
             if (resolvedSegments.Count == 0)
                 throw new InvalidOperationException("No playable segments found");
 
-            var liveStream = new BvfLiveStream(
-                CreateMediaSourceInfo(bvfFile, profileKey),
-                () => new ResolvedSegmentStream(bvfFile, resolvedSegments));
-            return Task.FromResult<ILiveStream>(liveStream);
+            var playbackPath = await _playbackRemuxer
+                .GetOrCreatePlaybackFileAsync(bvfFile, profileKey, resolvedSegments, cancellationToken)
+                .ConfigureAwait(false);
+
+            long? durationTicks = null;
+            try
+            {
+                var header = BVFReader.ReadHeader(bvfFile);
+                if (header.totalDurationMs > 0)
+                    durationTicks = checked((long)header.totalDurationMs * TimeSpan.TicksPerMillisecond);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Unable to read BVF duration for {Path}", bvfFile);
+            }
+
+            var mediaSource = CreateMediaSourceInfo(
+                bvfFile,
+                profileKey,
+                resolvedSegments,
+                fallbackRunTimeTicks: durationTicks);
+            mediaSource.Path = playbackPath;
+            mediaSource.Protocol = MediaProtocol.File;
+            mediaSource.IsRemote = false;
+            mediaSource.Container = "mp4";
+            mediaSource.Size = new FileInfo(playbackPath).Length;
+            mediaSource.SupportsTranscoding = false;
+            mediaSource.SupportsDirectPlay = true;
+            mediaSource.SupportsDirectStream = true;
+            mediaSource.SupportsProbing = true;
+            mediaSource.RequiresOpening = false;
+            mediaSource.RequiresClosing = false;
+            mediaSource.RunTimeTicks = ComputeProfileRunTimeTicks(resolvedSegments) ?? durationTicks;
+
+            var liveStream = new BvfFileLiveStream(mediaSource);
+            mediaSource.LiveStreamId = liveStream.UniqueId;
+            return liveStream;
         }
         catch (Exception ex)
         {
@@ -285,7 +305,6 @@ public class SegmentServer : IMediaSourceProvider
     private bool TryResolveRequestProfile(BranchManifest manifest, out string profileKey)
     {
         profileKey = string.Empty;
-
         var user = TryGetAuthenticatedUser();
         if (user == null)
             return false;
@@ -301,24 +320,23 @@ public class SegmentServer : IMediaSourceProvider
             return null;
 
         var claimsPrincipal = httpContext.User;
-        if (claimsPrincipal?.Identity?.IsAuthenticated != true)
-            return null;
-
         var userId = FirstNonEmpty(
-            claimsPrincipal.FindFirstValue(ClaimTypes.NameIdentifier),
-            claimsPrincipal.FindFirstValue("UserId"),
-            claimsPrincipal.FindFirstValue("user_id"),
+            claimsPrincipal?.FindFirstValue(JellyfinUserIdClaimType),
+            claimsPrincipal?.FindFirstValue(ClaimTypes.NameIdentifier),
+            claimsPrincipal?.FindFirstValue("UserId"),
+            claimsPrincipal?.FindFirstValue("user_id"),
             httpContext.Request.Query["UserId"].FirstOrDefault(),
-            httpContext.Request.Query["userId"].FirstOrDefault());
+            httpContext.Request.Query["userId"].FirstOrDefault(),
+            TryReadUserIdFromRequestBody(httpContext.Request));
 
-        if (!Guid.TryParse(userId, out var parsedUserId))
+        if (!Guid.TryParse(userId, out var parsedUserId) || parsedUserId == Guid.Empty)
             return null;
 
         var userName = FirstNonEmpty(
-            claimsPrincipal.Identity?.Name,
-            claimsPrincipal.FindFirstValue(ClaimTypes.Name),
-            claimsPrincipal.FindFirstValue("JellyfinUserName"),
-            claimsPrincipal.FindFirstValue("username"));
+            claimsPrincipal?.Identity?.Name,
+            claimsPrincipal?.FindFirstValue(ClaimTypes.Name),
+            claimsPrincipal?.FindFirstValue("JellyfinUserName"),
+            claimsPrincipal?.FindFirstValue("username"));
 
         return new UserDto
         {
@@ -327,10 +345,49 @@ public class SegmentServer : IMediaSourceProvider
         };
     }
 
-    private static string? FirstNonEmpty(params string?[] values)
+    private static string? TryReadUserIdFromRequestBody(HttpRequest request)
     {
-        return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+        if (!HttpMethods.IsPost(request.Method) && !HttpMethods.IsPut(request.Method))
+            return null;
+
+        try
+        {
+            request.EnableBuffering();
+            if (!request.Body.CanSeek)
+                return null;
+
+            var originalPosition = request.Body.Position;
+            request.Body.Position = 0;
+            using var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+            var json = reader.ReadToEnd();
+            request.Body.Position = originalPosition;
+
+            if (string.IsNullOrWhiteSpace(json))
+                return null;
+
+            using var document = JsonDocument.Parse(json);
+            foreach (var propertyName in new[] { "UserId", "userId" })
+            {
+                if (!document.RootElement.TryGetProperty(propertyName, out var property))
+                    continue;
+
+                return property.ValueKind switch
+                {
+                    JsonValueKind.String => property.GetString(),
+                    _ => property.GetRawText().Trim('"'),
+                };
+            }
+        }
+        catch
+        {
+            // Body may already be consumed by model binding.
+        }
+
+        return null;
     }
+
+    private static string? FirstNonEmpty(params string?[] values)
+        => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 
     private static string GetDefaultProfile(BranchManifest manifest)
     {
@@ -347,42 +404,98 @@ public class SegmentServer : IMediaSourceProvider
         return manifest.Profiles.Keys.FirstOrDefault() ?? "adult";
     }
 
-    private static MediaSourceInfo CreateMediaSourceInfo(string bvfPath, string profileKey, bool isAutomaticSelection = false)
+    private long? ComputeProfileRunTimeTicks(IReadOnlyList<ResolvedSegment> segments)
     {
-        var token = EncodeMediaSourceToken(bvfPath, profileKey);
-        return new MediaSourceInfo
+        if (segments.Count == 0)
+            return null;
+
+        long totalMs = 0;
+        foreach (var segment in segments)
+            totalMs += (long)segment.DurationMs;
+
+        if (totalMs <= 0)
+            return null;
+
+        return checked(totalMs * TimeSpan.TicksPerMillisecond);
+    }
+
+    private MediaSourceInfo CreateMediaSourceInfo(
+        string bvfPath,
+        string profileKey,
+        IReadOnlyList<ResolvedSegment> resolvedSegments,
+        bool isAutomaticSelection = false,
+        long? fallbackRunTimeTicks = null,
+        string? playbackPath = null)
+    {
+        playbackPath ??= isAutomaticSelection
+            ? _playbackRemuxer.TryGetCachedPlaybackPath(bvfPath, profileKey, resolvedSegments)
+            : null;
+        var isReady = !string.IsNullOrEmpty(playbackPath) && File.Exists(playbackPath);
+        var mediaSource = new MediaSourceInfo
         {
-            Id = token,
+            // HLS helpers Guid.Parse(MediaSourceId); keep this a real GUID.
+            Id = CreateMediaSourceId(bvfPath, profileKey),
             Name = isAutomaticSelection ? $"Smart Branch (auto: {profileKey})" : $"Smart Branch ({profileKey})",
-            Path = bvfPath,
+            Path = isReady ? playbackPath : bvfPath,
+            Protocol = MediaProtocol.File,
             Container = "mp4",
+            VideoType = VideoType.VideoFile,
+            RunTimeTicks = ComputeProfileRunTimeTicks(resolvedSegments) ?? fallbackRunTimeTicks,
             MediaStreams = new List<MediaStream>
             {
                 new MediaStream
                 {
                     Type = MediaStreamType.Video,
                     Codec = "h264",
+                    Width = 1920,
+                    Height = 1080,
+                    Index = 0,
+                    IsDefault = true,
+                },
+                new MediaStream
+                {
+                    Type = MediaStreamType.Audio,
+                    Codec = "aac",
+                    Channels = 2,
+                    SampleRate = 48000,
+                    Index = 1,
+                    IsDefault = true,
                 },
             },
-            SupportsProbing = false,
+            Bitrate = 8_000_000,
+            SupportsProbing = isReady,
             IsRemote = false,
-            RequiresOpening = true,
-            OpenToken = token,
-            RequiresClosing = true,
-            SupportsDirectPlay = false,
+            RequiresOpening = !isReady,
+            OpenToken = EncodeMediaSourceToken(bvfPath, profileKey),
+            RequiresClosing = !isReady,
+            SupportsDirectPlay = true,
             SupportsDirectStream = true,
-            SupportsTranscoding = true,
+            SupportsTranscoding = false,
         };
+
+        if (isReady)
+            mediaSource.Size = new FileInfo(playbackPath!).Length;
+
+        return mediaSource;
+    }
+
+    private static string CreateMediaSourceId(string bvfPath, string profileKey)
+    {
+        var hash = MD5.HashData(Encoding.UTF8.GetBytes($"{TokenPrefix}|{bvfPath}|{profileKey}"));
+        return new Guid(hash).ToString("N");
     }
 
     private static string EncodeMediaSourceToken(string bvfPath, string profileKey)
-    {
-        return $"{TokenPrefix}:{Base64UrlEncode(bvfPath)}:{Base64UrlEncode(profileKey)}";
-    }
+        => $"{TokenPrefix}:{Base64UrlEncode(bvfPath)}:{Base64UrlEncode(profileKey)}";
 
     private static (string BvfPath, string ProfileKey) DecodeMediaSourceToken(string token)
     {
-        var parts = token.Split(':');
+        var payload = token;
+        var prefixIndex = payload.IndexOf($"{TokenPrefix}:", StringComparison.Ordinal);
+        if (prefixIndex > 0)
+            payload = payload[prefixIndex..];
+
+        var parts = payload.Split(':');
         if (parts.Length != 3 || !string.Equals(parts[0], TokenPrefix, StringComparison.Ordinal))
             throw new ArgumentException($"Invalid BVF media source token: {token}", nameof(token));
 
@@ -390,12 +503,10 @@ public class SegmentServer : IMediaSourceProvider
     }
 
     private static string Base64UrlEncode(string value)
-    {
-        return Convert.ToBase64String(Encoding.UTF8.GetBytes(value))
+        => Convert.ToBase64String(Encoding.UTF8.GetBytes(value))
             .TrimEnd('=')
             .Replace('+', '-')
             .Replace('/', '_');
-    }
 
     private static string Base64UrlDecode(string value)
     {
@@ -404,16 +515,11 @@ public class SegmentServer : IMediaSourceProvider
         return Encoding.UTF8.GetString(Convert.FromBase64String(padded));
     }
 
-    private sealed class BvfLiveStream : ILiveStream
+    private sealed class BvfFileLiveStream : ILiveStream
     {
-        private readonly Func<Stream> _streamFactory;
-        private Stream? _currentStream;
-        private bool _disposed;
-
-        public BvfLiveStream(MediaSourceInfo mediaSource, Func<Stream> streamFactory)
+        public BvfFileLiveStream(MediaSourceInfo mediaSource)
         {
             MediaSource = mediaSource;
-            _streamFactory = streamFactory;
         }
 
         public int ConsumerCount { get; set; }
@@ -423,39 +529,21 @@ public class SegmentServer : IMediaSourceProvider
         public MediaSourceInfo MediaSource { get; set; }
         public string UniqueId { get; } = Guid.NewGuid().ToString("N");
 
-        public Task Open(CancellationToken openCancellationToken)
-        {
-            return Task.CompletedTask;
-        }
+        public Task Open(CancellationToken openCancellationToken) => Task.CompletedTask;
 
-        public Task Close()
-        {
-            DisposeCurrentStream();
-            return Task.CompletedTask;
-        }
+        public Task Close() => Task.CompletedTask;
 
         public Stream GetStream()
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            var path = MediaSource.Path;
+            if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                throw new FileNotFoundException("BVF playback file not found.", path);
 
-            DisposeCurrentStream();
-            _currentStream = _streamFactory();
-            return _currentStream;
+            return File.OpenRead(path);
         }
 
         public void Dispose()
         {
-            if (_disposed)
-                return;
-
-            DisposeCurrentStream();
-            _disposed = true;
-        }
-
-        private void DisposeCurrentStream()
-        {
-            _currentStream?.Dispose();
-            _currentStream = null;
         }
     }
 }

@@ -7,7 +7,7 @@
 
 **Workflow:**
 1. **Pre-Processing (Python):** Run `python analyze.py "movie.mp4"` → generates `movie.bvf` (self-contained Branched Video Format file)
-2. **Playback (C# Plugin):** Jellyfin plugin reads the BVF container, resolves segments per user profile, serves filtered stream through Jellyfin's native pipeline
+2. **Playback (C# Plugin):** Jellyfin indexes `.bvf` as a first-class library item; the plugin resolves viewer profile and serves the filtered stream
 
 ## 2. Architecture
 ```
@@ -20,15 +20,15 @@
 │  Stack: Whisper (audio) + Safety Checker (NSFW) + FFmpeg         │
 └──────────────────────────────────────────────────────────────────┘
                           │
-                          │ drops .bvf file next to the movie
+                          │ drops .bvf into a Jellyfin library folder
                           v
 ┌──────────────────────────────────────────────────────────────────┐
 │  Jellyfin Server (.NET 8)                                         │
 │                                                                  │
 │  Smart Branching Plugin (C#):                                    │
-│    1. MediaSource provider checks each movie for sibling .bvf    │
-│    2. Exposes one "Smart Branch" media source per BVF profile    │
-│    3. On Play: opens the selected profile source                 │
+│    1. Registers .bvf as a video extension + library resolver     │
+│    2. Indexes .bvf as Movie/Video; ignores same-stem sibling mp4 │
+│    3. Exposes Smart Branch media source(s) per resolved profile  │
 │    4. Serves resolved segments through Jellyfin's streaming pipe │
 │    5. Mature segments → swap or skip as configured at runtime;   │
 │       mute/blur remain reserved manifest actions for future use   │
@@ -166,12 +166,14 @@ The implementation should treat Marlin-2B output as content-understanding eviden
 | `Plugin` | Entry point and configuration page registration |
 | `BVFReader` | Parses BVF binary format: reads header, index, decompresses manifest |
 | `ProfileResolver` | Maps Jellyfin users to branch profiles, resolves segment actions |
-| `SegmentServer` | MediaSource provider that finds sibling `.bvf` files and serves resolved segments through Jellyfin's streaming pipeline |
+| `SegmentServer` | MediaSource provider that opens first-class `.bvf` library items (or legacy sibling `.bvf`) and serves resolved segments through Jellyfin's streaming pipeline |
+| `BvfItemResolver` | Library resolver that turns `.bvf` files into `BvfMovie` / `BvfVideo` items |
+| `PreferBvfSiblingIgnoreRule` | Ignores same-stem video files when a sibling `.bvf` exists |
 
 ### How Playback Works
-1. User clicks "Play" on a movie
-2. `SegmentServer` checks for `.bvf` in the same directory
-3. If found, exposes one "Smart Branch" MediaSource per manifest profile
+1. User clicks Play on a `.bvf` library item (or a legacy video with sibling `.bvf`)
+2. `SegmentServer` resolves the BVF path from the item
+3. It exposes Smart Branch MediaSource(s) for the authenticated user's profile, or one source per manifest profile
 4. On playback start, `BVFReader` parses header + index and resolves the selected profile's manifest actions
 5. Segments are served through Jellyfin's native streaming (no external proxy)
 6. Mature segments are swapped or skipped at runtime based on profile filters; reserved `mute`/`blur` actions are rejected explicitly
@@ -260,7 +262,9 @@ vid_splitter/
 ### Phase 2: C# Plugin Skeleton ✅
 * [x] `csharp_plugin/` with official Jellyfin plugin template structure
 * [x] `Plugin.cs` — entry point and config page registration
-* [x] `SegmentServer.cs` — Jellyfin media source provider that finds `.bvf` files alongside movies
+* [x] `SegmentServer.cs` — Jellyfin media source provider for first-class `.bvf` items
+* [x] `BvfItemResolver.cs` / `PreferBvfSiblingIgnoreRule.cs` — library discovery for `.bvf`
+* [x] `BvfFormatRegistration.cs` — registers `.bvf` as a video extension
 * [x] `ProfileResolver.cs` — user-to-profile mapping (birthday+sex override system)
 * [x] `Configuration/` — config page with live profile resolution
 * [x] BVF binary format support (header + index + manifest parsing)

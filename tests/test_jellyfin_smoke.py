@@ -226,6 +226,34 @@ def test_jellyfin_client_raises_clear_errors_for_http_failures(status_code: int,
             client.get_public_system_info()
 
 
+def test_jellyfin_client_find_movie_item_prefers_bvf_path():
+    client = jellyfin_smoke.JellyfinClient(
+        jellyfin_smoke.SmokeConfig(
+            jellyfin_base_url="https://jellyfin.example",
+            jellyfin_api_key="secret",
+            jellyfin_username=None,
+            jellyfin_password=None,
+            jellyfin_shorts_dir=None,
+        )
+    )
+    movie_path = Path("/library/Movies/Movie.mp4")
+    bvf_path = Path("/library/Movies/Movie.bvf")
+
+    with mock.patch.object(
+        client,
+        "_request_json",
+        return_value={
+            "Items": [
+                {"Id": "mp4", "Path": str(movie_path), "Name": "Movie"},
+                {"Id": "bvf", "Path": str(bvf_path), "Name": "Movie"},
+            ]
+        },
+    ):
+        item = client.find_movie_item(movie_path, search_terms=["Movie"])
+
+    assert item["Id"] == "bvf"
+
+
 def test_jellyfin_client_find_movie_item_matches_exact_path():
     client = jellyfin_smoke.JellyfinClient(
         jellyfin_smoke.SmokeConfig(

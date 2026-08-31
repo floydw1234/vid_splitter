@@ -49,6 +49,36 @@ public static class BVFReader
         ReadCommentHandling = JsonCommentHandling.Skip,
     };
 
+    /// <summary>
+    /// Cheap magic-byte check used during library resolution.
+    /// </summary>
+    public static bool LooksLikeBvf(string filePath)
+    {
+        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+            return false;
+
+        try
+        {
+            using var stream = File.OpenRead(filePath);
+            if (stream.Length < 8)
+                return false;
+
+            Span<byte> magic = stackalloc byte[8];
+            var read = stream.Read(magic);
+            if (read < 8)
+                return false;
+
+            return magic[0] == (byte)'B'
+                && magic[1] == (byte)'V'
+                && magic[2] == (byte)'F'
+                && magic[3] == 0x01;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static BVFInfo ReadHeader(string filePath)
     {
         if (!File.Exists(filePath))

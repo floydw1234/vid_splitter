@@ -6,7 +6,6 @@ namespace Jellyfin.Plugin.SmartBranching.Configuration;
 
 /// <summary>
 /// Per-user profile data stored by the plugin.
-/// Keyed by Jellyfin user ID (Guid string) in <see cref="PluginConfiguration.UserProfiles"/>.
 /// </summary>
 public class UserBranchProfile
 {
@@ -30,6 +29,24 @@ public class UserBranchProfile
 }
 
 /// <summary>
+/// Serializable key-value pair for user profiles.
+/// Jellyfin's XmlSerializer cannot serialize IDictionary members, so profiles are
+/// stored as a list of entries instead of a dictionary.
+/// </summary>
+public class UserProfileEntry
+{
+    /// <summary>
+    /// Gets or sets the Jellyfin user ID (Guid string).
+    /// </summary>
+    public string UserId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the stored branch profile for the user.
+    /// </summary>
+    public UserBranchProfile Profile { get; set; } = new();
+}
+
+/// <summary>
 /// Plugin configuration options.
 /// </summary>
 public class PluginConfiguration : BasePluginConfiguration
@@ -41,8 +58,13 @@ public class PluginConfiguration : BasePluginConfiguration
         FillerDirectory = "smart_branching/filler";
         NsfwThreshold = 0.75f;
         DefaultAction = "swap";
-        UserProfiles = new Dictionary<string, UserBranchProfile>();
+        UserProfileEntries = new List<UserProfileEntry>();
     }
+
+    /// <summary>
+    /// Gets or sets per-user profile data as a serializable list.
+    /// </summary>
+    public List<UserProfileEntry> UserProfileEntries { get; set; }
 
     /// <summary>
     /// Gets or sets a value indicating whether smart branching is enabled.
@@ -50,7 +72,7 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool Enabled { get; set; }
 
     /// <summary>
-    /// Gets or sets the default profile for users with no entry in <see cref="UserProfiles"/>.
+    /// Gets or sets the default profile for users with no stored entry.
     /// </summary>
     public string DefaultProfile { get; set; }
 
@@ -70,7 +92,56 @@ public class PluginConfiguration : BasePluginConfiguration
     public string DefaultAction { get; set; }
 
     /// <summary>
-    /// Gets or sets per-user profile data. Key is the Jellyfin user ID as a string.
+    /// Looks up the stored branch profile for a Jellyfin user by user ID.
     /// </summary>
-    public Dictionary<string, UserBranchProfile> UserProfiles { get; set; }
+    public bool TryGetUserProfile(string userId, out UserBranchProfile profile)
+    {
+        var entries = UserProfileEntries;
+        if (entries != null)
+        {
+            foreach (var entry in entries)
+            {
+                if (!string.IsNullOrEmpty(entry.UserId) &&
+                    UserIdsMatch(entry.UserId, userId))
+                {
+                    profile = entry.Profile ?? new UserBranchProfile();
+                    return true;
+                }
+            }
+        }
+
+        profile = new UserBranchProfile();
+        return false;
+    }
+
+    private static bool UserIdsMatch(string left, string right)
+    {
+        if (string.Equals(left, right, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return Guid.TryParse(left, out var leftGuid) &&
+               Guid.TryParse(right, out var rightGuid) &&
+               leftGuid == rightGuid;
+    }
+
+    /// <summary>
+    /// Replaces the stored user profiles from a dictionary keyed by user ID.
+    /// </summary>
+    public void SetUserProfiles(Dictionary<string, UserBranchProfile> profiles)
+    {
+        var entries = new List<UserProfileEntry>();
+        if (profiles != null)
+        {
+            foreach (var kvp in profiles)
+            {
+                entries.Add(new UserProfileEntry
+                {
+                    UserId = kvp.Key,
+                    Profile = kvp.Value
+                });
+            }
+        }
+
+        UserProfileEntries = entries;
+    }
 }

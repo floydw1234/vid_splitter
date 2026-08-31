@@ -1,14 +1,15 @@
 ---
 name: "Smart Branching"
 guid: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-version: "0.1.0.0"
+version: "0.2.0.0"
 targetAbi: "10.9.0.0"
 framework: "net8.0"
 overview: "Context-aware playback with mature content filtering for Jellyfin"
 description: >
   A Jellyfin plugin that provides age- and profile-aware video playback.
-  Python pre-processing generates content manifests, and the C# plugin
-  serves profile-filtered streams directly through Jellyfin.
+  Python pre-processing generates self-contained .bvf media files, and the C#
+  plugin indexes those files as first-class library items and serves
+  profile-filtered streams through Jellyfin.
 category: "General"
 owner: "vid_splitter"
 artifacts:
@@ -16,6 +17,10 @@ artifacts:
 - "Jellyfin.Plugin.SmartBranching.deps.json"
 - "ZstdSharp.dll"
 changelog: >
+  0.2.0
+  - Treat .bvf as a first-class Jellyfin video format
+  - Library resolver + sibling-mp4 ignore when .bvf is present
+  - Smart Branch playback sources for primary .bvf items
   0.1.0
   - Initial release
   - Jellyfin media source registration

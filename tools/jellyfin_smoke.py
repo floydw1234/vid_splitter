@@ -179,9 +179,19 @@ class JellyfinClient:
         query = {"searchTerm": search_terms[0]} if search_terms else {"searchTerm": movie_path.stem}
         payload = self._request_json("GET", "/Items", query=query)
         items = payload.get("Items", [])
-        exact_matches = [item for item in items if item.get("Path") == str(movie_path)]
-        if exact_matches:
-            return exact_matches[0]
+
+        # Prefer the first-class .bvf library item, then fall back to legacy mp4 path.
+        candidate_paths = []
+        if movie_path.suffix.lower() == ".bvf":
+            candidate_paths.append(str(movie_path))
+        else:
+            candidate_paths.append(str(get_bvf_path(movie_path)))
+            candidate_paths.append(str(movie_path))
+
+        for candidate in candidate_paths:
+            exact_matches = [item for item in items if item.get("Path") == candidate]
+            if exact_matches:
+                return exact_matches[0]
 
         if len(items) == 0:
             return None
@@ -238,7 +248,7 @@ class JellyfinClient:
         if not discovery["sources"]:
             raise JellyfinApiError(
                 "No Smart Branch sources discovered after refresh. Check Jellyfin plugin logs "
-                "and verify the sibling .bvf file is present next to the movie."
+                "and verify the .bvf library item is present and readable."
             )
         return discovery
 
@@ -396,9 +406,12 @@ def perform_smoke_workflow(
     probe_bvf(bvf_path)
 
     client = JellyfinClient(load_smoke_config())
-    item = client.find_movie_item(video_path, search_terms=[video_path.stem])
+    # After plugin install, .bvf is the library item (sibling mp4 is ignored when present).
+    item = client.find_movie_item(bvf_path, search_terms=[video_path.stem])
     if item is None:
-        raise JellyfinApiError(f"Jellyfin item not found for video: {video_path}")
+        item = client.find_movie_item(video_path, search_terms=[video_path.stem])
+    if item is None:
+        raise JellyfinApiError(f"Jellyfin item not found for BVF/video: {bvf_path}")
 
     discovery = client.verify_smart_branch_discovery(
         item_id=str(item["Id"]),

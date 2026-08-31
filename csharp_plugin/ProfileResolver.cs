@@ -26,8 +26,8 @@ public class ProfileResolver
         var config = Plugin.Instance?.Configuration;
         var userId = user.Id.ToString();
 
-        if (config?.UserProfiles != null &&
-            config.UserProfiles.TryGetValue(userId, out var stored))
+        if (config != null &&
+            config.TryGetUserProfile(userId, out var stored))
         {
             // 1. Explicit override wins
             if (!string.IsNullOrEmpty(stored.ProfileOverride))

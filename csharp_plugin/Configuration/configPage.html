@@ -92,294 +92,318 @@
                 </form>
             </div>
         </div>
-    </div>
 
-    <script type="text/javascript">
-        var SmartBranchingConfig = {
-            pluginUniqueId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
-        };
+        <script type="text/javascript">
+            (function () {
+                var pluginUniqueId = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+                var _loadingConfig = false;
 
-        var _loadingConfig = false;
-
-        function getElement(selector) {
-            return document.querySelector(selector);
-        }
-
-        function setTableLoading(message, isError) {
-            var tbody = getElement('#userProfileTableBody');
-            if (!tbody) return;
-            var color = isError ? 'color:red;' : '';
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 1em; ' + color + '">' + message + '</td></tr>';
-        }
-
-        function resolveProfile(birthday, sex, override) {
-            if (override && override !== '') {
-                return override;
-            }
-            if (!birthday) {
-                return '—';
-            }
-            var dob = new Date(birthday);
-            var today = new Date();
-            var age = today.getUTCFullYear() - dob.getUTCFullYear();
-            var m = today.getUTCMonth() - dob.getUTCMonth();
-            if (m < 0 || (m === 0 && today.getUTCDate() < dob.getUTCDate())) {
-                age--;
-            }
-
-            if (age < 13) {
-                return 'child';
-            }
-            if (age < 18) {
-                return sex === 'female' ? 'teen_f' : 'teen_m';
-            }
-
-            return 'adult';
-        }
-
-        function profileBadgeStyle(profile) {
-            var colors = {
-                child: '#4caf50',
-                teen_m: '#2196f3',
-                teen_f: '#e91e63',
-                adult: '#9e9e9e'
-            };
-            var color = colors[profile] || '#9e9e9e';
-            return 'display:inline-block;padding:2px 8px;border-radius:3px;background:' + color + ';color:#fff;font-size:0.85em;';
-        }
-
-        function updateResolvedCell(row) {
-            if (!row) {
-                return;
-            }
-
-            var birthday = row.querySelector('.userBirthday');
-            var sex = row.querySelector('.userSex');
-            var override = row.querySelector('.userOverride');
-            var cell = row.querySelector('.resolvedProfile');
-
-            if (!birthday || !sex || !override || !cell) {
-                return;
-            }
-
-            var profile = resolveProfile(birthday.value, sex.value, override.value);
-            cell.innerHTML = '<span style="' + profileBadgeStyle(profile) + '">' + profile + '</span>';
-        }
-
-        function buildUserRow(user, stored) {
-            var tr = document.createElement('tr');
-            tr.dataset.userId = user.Id || user.Id || '';
-            stored = stored || {};
-
-            tr.innerHTML =
-                '<td style="font-weight:500">' + (user.Name || user.Name || '') + '</td>' +
-                '<td><input type="date" class="emby-input userBirthday" value="' + (stored.Birthday || '') + '" style="width:140px" /></td>' +
-                '<td>' +
-                '  <select class="emby-select userSex" style="width:100px">' +
-                '    <option value="unset"' + ((stored.Sex === 'unset' || !stored.Sex) ? ' selected' : '') + '>Not set</option>' +
-                '    <option value="male"' + (stored.Sex === 'male' ? ' selected' : '') + '>Male</option>' +
-                '    <option value="female"' + (stored.Sex === 'female' ? ' selected' : '') + '>Female</option>' +
-                '  </select>' +
-                '</td>' +
-                '<td>' +
-                '  <select class="emby-select userOverride" style="width:110px">' +
-                '    <option value=""' + (!stored.ProfileOverride ? ' selected' : '') + '>Auto</option>' +
-                '    <option value="child"' + (stored.ProfileOverride === 'child' ? ' selected' : '') + '>Child</option>' +
-                '    <option value="teen_m"' + (stored.ProfileOverride === 'teen_m' ? ' selected' : '') + '>Teen (M)</option>' +
-                '    <option value="teen_f"' + (stored.ProfileOverride === 'teen_f' ? ' selected' : '') + '>Teen (F)</option>' +
-                '    <option value="adult"' + (stored.ProfileOverride === 'adult' ? ' selected' : '') + '>Adult</option>' +
-                '  </select>' +
-                '</td>' +
-                '<td class="resolvedProfile"></td>';
-
-            tr.querySelector('.userBirthday').addEventListener('change', function () {
-                updateResolvedCell(tr);
-            });
-            tr.querySelector('.userSex').addEventListener('change', function () {
-                updateResolvedCell(tr);
-            });
-            tr.querySelector('.userOverride').addEventListener('change', function () {
-                updateResolvedCell(tr);
-            });
-
-            updateResolvedCell(tr);
-            return tr;
-        }
-
-        function normalizeUsersResponse(response) {
-            if (Array.isArray(response)) {
-                return response;
-            }
-
-            if (!response) {
-                return [];
-            }
-
-            if (Array.isArray(response.Items)) {
-                return response.Items;
-            }
-
-            return [];
-        }
-
-        function loadUsers(savedConfig) {
-            var tbody = getElement('#userProfileTableBody');
-            if (!tbody) {
-                return Promise.resolve();
-            }
-
-            tbody.innerHTML = '';
-
-            if (!ApiClient || typeof ApiClient.getUsers !== 'function') {
-                setTableLoading('API does not support user lookup', true);
-                return Promise.resolve();
-            }
-
-            var usersPromise = ApiClient.getUsers();
-            var timeoutPromise = new Promise(function (_, reject) {
-                setTimeout(function () { reject(new Error('getUsers timed out after 5s')); }, 5000);
-            });
-
-            return Promise.race([usersPromise, timeoutPromise])
-                .then(function (response) {
-                    var users = normalizeUsersResponse(response);
-                    var stored = (savedConfig && savedConfig.UserProfiles) ? savedConfig.UserProfiles : {};
-
-                    users.forEach(function (user) {
-                        var row = buildUserRow(user, stored[user.Id] || {});
-                        tbody.appendChild(row);
-                    });
-
-                    if (users.length === 0) {
-                        setTableLoading('No users found', false);
-                    }
-                })
-                .catch(function (err) {
-                    setTableLoading('Failed to load users: ' + (err && err.message ? err.message : 'unknown error'), true);
-                });
-        }
-
-        function loadConfig() {
-            if (_loadingConfig) {
-                return Promise.resolve();
-            }
-
-            _loadingConfig = true;
-            Dashboard.showLoadingMsg();
-
-            return ApiClient.getPluginConfiguration(SmartBranchingConfig.pluginUniqueId)
-                .then(function (config) {
-                    var pageForm = getElement('#smartBranchingConfigForm');
-                    if (!pageForm) {
-                        throw new Error('Config page not available');
-                    }
-
-                    getElement('#enableSmartBranching').checked = config.Enabled !== false;
-                    getElement('#defaultProfile').value = config.DefaultProfile || 'adult';
-                    getElement('#nsfwThreshold').value = (config.NsfwThreshold !== undefined && config.NsfwThreshold !== null) ? config.NsfwThreshold : 0.75;
-                    getElement('#fillerDirectory').value = config.FillerDirectory || 'smart_branching/filler';
-                    getElement('#defaultAction').value = config.DefaultAction || 'swap';
-
-                    return loadUsers(config);
-                })
-                .catch(function (err) {
-                    var msg = 'Failed to load Smart Branching settings: ' + (err && err.message ? err.message : 'unknown error');
-                    Dashboard.alert(msg);
-                    setTableLoading(msg, true);
-                })
-                .finally(function () {
-                    Dashboard.hideLoadingMsg();
-                    _loadingConfig = false;
-                });
-        }
-
-        function saveConfig(e) {
-            if (e && e.preventDefault) {
-                e.preventDefault();
-            }
-
-            if (!window.ApiClient) {
-                return false;
-            }
-
-            Dashboard.showLoadingMsg();
-
-            ApiClient.getPluginConfiguration(SmartBranchingConfig.pluginUniqueId)
-                .then(function (config) {
-                    config.Enabled = getElement('#enableSmartBranching').checked;
-                    config.DefaultProfile = getElement('#defaultProfile').value;
-                    config.NsfwThreshold = parseFloat(getElement('#nsfwThreshold').value);
-                    config.FillerDirectory = getElement('#fillerDirectory').value;
-                    config.DefaultAction = getElement('#defaultAction').value;
-
-                    var rows = document.querySelectorAll('#userProfileTableBody tr[data-user-id]');
-                    var userProfiles = {};
-
-                    rows.forEach(function (row) {
-                        var uid = row.dataset.userId;
-                        var birthday = row.querySelector('.userBirthday');
-                        var sex = row.querySelector('.userSex');
-                        var override = row.querySelector('.userOverride');
-
-                        if (!uid || !birthday || !sex || !override) {
-                            return;
-                        }
-
-                        userProfiles[uid] = {
-                            Birthday: birthday.value || null,
-                            Sex: sex.value,
-                            ProfileOverride: override.value || null
-                        };
-                    });
-
-                    config.UserProfiles = userProfiles;
-                    return ApiClient.updatePluginConfiguration(SmartBranchingConfig.pluginUniqueId, config);
-                })
-                .then(function (result) {
-                    Dashboard.processPluginConfigurationUpdateResult(result);
-                })
-                .catch(function () {
-                    Dashboard.alert('Failed to save Smart Branching settings.');
-                })
-                .finally(function () {
-                    Dashboard.hideLoadingMsg();
-                });
-
-            return false;
-        }
-
-        function tryInit() {
-            var form = getElement('#smartBranchingConfigForm');
-            if (!form) {
-                return false;
-            }
-
-            form.addEventListener('submit', saveConfig);
-
-            if (window.ApiClient) {
-                loadConfig();
-                return true;
-            }
-
-            return false;
-        }
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', tryInit);
-        } else {
-            tryInit();
-        }
-
-        if (!tryInit()) {
-            var pollCount = 0;
-            var pollMax = 20;
-            var pollId = setInterval(function () {
-                pollCount++;
-                if (tryInit() || pollCount >= pollMax) {
-                    clearInterval(pollId);
+                function getElement(selector) {
+                    return document.querySelector(selector);
                 }
-            }, 200);
-        }
-    </script>
+
+                function setTableLoading(message, isError) {
+                    var tbody = getElement('#userProfileTableBody');
+                    if (!tbody) return;
+                    var color = isError ? 'color:red;' : '';
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 1em; ' + color + '">' + message + '</td></tr>';
+                }
+
+                function showError(message) {
+                    setTableLoading(message, true);
+                    if (window.Dashboard && typeof Dashboard.alert === 'function') {
+                        Dashboard.alert(message);
+                    }
+                }
+
+                function resolveProfile(birthday, sex, override) {
+                    if (override && override !== '') {
+                        return override;
+                    }
+                    if (!birthday) {
+                        return '—';
+                    }
+                    var dob = new Date(birthday);
+                    var today = new Date();
+                    var age = today.getUTCFullYear() - dob.getUTCFullYear();
+                    var m = today.getUTCMonth() - dob.getUTCMonth();
+                    if (m < 0 || (m === 0 && today.getUTCDate() < dob.getUTCDate())) {
+                        age--;
+                    }
+
+                    if (age < 13) {
+                        return 'child';
+                    }
+                    if (age < 18) {
+                        return sex === 'female' ? 'teen_f' : 'teen_m';
+                    }
+
+                    return 'adult';
+                }
+
+                function profileBadgeStyle(profile) {
+                    var colors = {
+                        child: '#4caf50',
+                        teen_m: '#2196f3',
+                        teen_f: '#e91e63',
+                        adult: '#9e9e9e'
+                    };
+                    var color = colors[profile] || '#9e9e9e';
+                    return 'display:inline-block;padding:2px 8px;border-radius:3px;background:' + color + ';color:#fff;font-size:0.85em;';
+                }
+
+                function updateResolvedCell(row) {
+                    if (!row) {
+                        return;
+                    }
+
+                    var birthday = row.querySelector('.userBirthday');
+                    var sex = row.querySelector('.userSex');
+                    var override = row.querySelector('.userOverride');
+                    var cell = row.querySelector('.resolvedProfile');
+
+                    if (!birthday || !sex || !override || !cell) {
+                        return;
+                    }
+
+                    var profile = resolveProfile(birthday.value, sex.value, override.value);
+                    cell.innerHTML = '<span style="' + profileBadgeStyle(profile) + '">' + profile + '</span>';
+                }
+
+                function buildUserRow(user, stored) {
+                    var tr = document.createElement('tr');
+                    tr.dataset.userId = user.Id || '';
+                    stored = stored || {};
+
+                    tr.innerHTML =
+                        '<td style="font-weight:500">' + (user.Name || '') + '</td>' +
+                        '<td><input type="date" class="emby-input userBirthday" value="' + (stored.Birthday || '') + '" style="width:140px" /></td>' +
+                        '<td>' +
+                        '  <select class="emby-select userSex" style="width:100px">' +
+                        '    <option value="unset"' + ((stored.Sex === 'unset' || !stored.Sex) ? ' selected' : '') + '>Not set</option>' +
+                        '    <option value="male"' + (stored.Sex === 'male' ? ' selected' : '') + '>Male</option>' +
+                        '    <option value="female"' + (stored.Sex === 'female' ? ' selected' : '') + '>Female</option>' +
+                        '  </select>' +
+                        '</td>' +
+                        '<td>' +
+                        '  <select class="emby-select userOverride" style="width:110px">' +
+                        '    <option value=""' + (!stored.ProfileOverride ? ' selected' : '') + '>Auto</option>' +
+                        '    <option value="child"' + (stored.ProfileOverride === 'child' ? ' selected' : '') + '>Child</option>' +
+                        '    <option value="teen_m"' + (stored.ProfileOverride === 'teen_m' ? ' selected' : '') + '>Teen (M)</option>' +
+                        '    <option value="teen_f"' + (stored.ProfileOverride === 'teen_f' ? ' selected' : '') + '>Teen (F)</option>' +
+                        '    <option value="adult"' + (stored.ProfileOverride === 'adult' ? ' selected' : '') + '>Adult</option>' +
+                        '  </select>' +
+                        '</td>' +
+                        '<td class="resolvedProfile"></td>';
+
+                    tr.querySelector('.userBirthday').addEventListener('change', function () {
+                        updateResolvedCell(tr);
+                    });
+                    tr.querySelector('.userSex').addEventListener('change', function () {
+                        updateResolvedCell(tr);
+                    });
+                    tr.querySelector('.userOverride').addEventListener('change', function () {
+                        updateResolvedCell(tr);
+                    });
+
+                    updateResolvedCell(tr);
+                    return tr;
+                }
+
+                function normalizeUsersResponse(response) {
+                    if (Array.isArray(response)) {
+                        return response;
+                    }
+
+                    if (!response) {
+                        return [];
+                    }
+
+                    if (Array.isArray(response.Items)) {
+                        return response.Items;
+                    }
+
+                    return [];
+                }
+
+                function loadUsers(savedConfig) {
+                    var tbody = getElement('#userProfileTableBody');
+                    if (!tbody) {
+                        return Promise.resolve();
+                    }
+
+                    tbody.innerHTML = '';
+
+                    if (!window.ApiClient || typeof ApiClient.getUsers !== 'function') {
+                        setTableLoading('API does not support user lookup', true);
+                        return Promise.resolve();
+                    }
+
+                    var stored = {};
+                    if (savedConfig && Array.isArray(savedConfig.UserProfileEntries)) {
+                        savedConfig.UserProfileEntries.forEach(function (entry) {
+                            if (entry && entry.UserId && entry.Profile) {
+                                stored[entry.UserId] = entry.Profile;
+                            }
+                        });
+                    } else if (savedConfig && savedConfig.UserProfiles && typeof savedConfig.UserProfiles === 'object') {
+                        stored = savedConfig.UserProfiles;
+                    }
+
+                    var timerId = null;
+                    var usersPromise = ApiClient.getUsers();
+                    var timeoutPromise = new Promise(function (_, reject) {
+                        timerId = setTimeout(function () {
+                            reject(new Error('getUsers timed out after 5s'));
+                        }, 5000);
+                    });
+
+                    return Promise.race([usersPromise, timeoutPromise])
+                        .then(function (response) {
+                            if (timerId) {
+                                clearTimeout(timerId);
+                            }
+
+                            var users = normalizeUsersResponse(response);
+
+                            users.forEach(function (user) {
+                                var row = buildUserRow(user, stored[user.Id] || {});
+                                tbody.appendChild(row);
+                            });
+
+                            if (users.length === 0) {
+                                setTableLoading('No users found', false);
+                            }
+                        })
+                        .catch(function (err) {
+                            if (timerId) {
+                                clearTimeout(timerId);
+                            }
+
+                            setTableLoading('Failed to load users: ' + (err && err.message ? err.message : 'unknown error'), true);
+                        });
+                }
+
+                function loadConfig() {
+                    if (_loadingConfig) {
+                        return;
+                    }
+
+                    if (!window.ApiClient || typeof ApiClient.getPluginConfiguration !== 'function') {
+                        setTableLoading('API client not available', true);
+                        return;
+                    }
+
+                    _loadingConfig = true;
+                    if (window.Dashboard && typeof Dashboard.showLoadingMsg === 'function') {
+                        Dashboard.showLoadingMsg();
+                    }
+
+                    ApiClient.getPluginConfiguration(pluginUniqueId)
+                        .then(function (config) {
+                            var pageForm = getElement('#smartBranchingConfigForm');
+                            if (!pageForm) {
+                                throw new Error('Config page not available');
+                            }
+
+                            getElement('#enableSmartBranching').checked = config.Enabled !== false;
+                            getElement('#defaultProfile').value = config.DefaultProfile || 'adult';
+                            getElement('#nsfwThreshold').value = (config.NsfwThreshold !== undefined && config.NsfwThreshold !== null) ? config.NsfwThreshold : 0.75;
+                            getElement('#fillerDirectory').value = config.FillerDirectory || 'smart_branching/filler';
+                            getElement('#defaultAction').value = config.DefaultAction || 'swap';
+
+                            return loadUsers(config);
+                        })
+                        .catch(function (err) {
+                            var msg = 'Failed to load Smart Branching settings: ' + (err && err.message ? err.message : 'unknown error');
+                            showError(msg);
+                        })
+                        .finally(function () {
+                            if (window.Dashboard && typeof Dashboard.hideLoadingMsg === 'function') {
+                                Dashboard.hideLoadingMsg();
+                            }
+                            _loadingConfig = false;
+                        });
+                }
+
+                function saveConfig(e) {
+                    if (e && e.preventDefault) {
+                        e.preventDefault();
+                    }
+
+                    if (!window.ApiClient || typeof ApiClient.updatePluginConfiguration !== 'function') {
+                        showError('API client not available');
+                        return false;
+                    }
+
+                    if (window.Dashboard && typeof Dashboard.showLoadingMsg === 'function') {
+                        Dashboard.showLoadingMsg();
+                    }
+
+                    ApiClient.getPluginConfiguration(pluginUniqueId)
+                        .then(function (config) {
+                            config.Enabled = getElement('#enableSmartBranching').checked;
+                            config.DefaultProfile = getElement('#defaultProfile').value;
+                            config.NsfwThreshold = parseFloat(getElement('#nsfwThreshold').value);
+                            config.FillerDirectory = getElement('#fillerDirectory').value;
+                            config.DefaultAction = getElement('#defaultAction').value;
+
+                            var rows = document.querySelectorAll('#userProfileTableBody tr[data-user-id]');
+                            var entries = [];
+
+                            rows.forEach(function (row) {
+                                var uid = row.dataset.userId;
+                                var birthday = row.querySelector('.userBirthday');
+                                var sex = row.querySelector('.userSex');
+                                var override = row.querySelector('.userOverride');
+
+                                if (!uid || !birthday || !sex || !override) {
+                                    return;
+                                }
+
+                                entries.push({
+                                    UserId: uid,
+                                    Profile: {
+                                        Birthday: birthday.value || null,
+                                        Sex: sex.value,
+                                        ProfileOverride: override.value || null
+                                    }
+                                });
+                            });
+
+                            config.UserProfileEntries = entries;
+                            delete config.UserProfiles;
+
+                            return ApiClient.updatePluginConfiguration(pluginUniqueId, config);
+                        })
+                        .then(function (result) {
+                            if (window.Dashboard && typeof Dashboard.processPluginConfigurationUpdateResult === 'function') {
+                                Dashboard.processPluginConfigurationUpdateResult(result);
+                            }
+                        })
+                        .catch(function () {
+                            showError('Failed to save Smart Branching settings.');
+                        })
+                        .finally(function () {
+                            if (window.Dashboard && typeof Dashboard.hideLoadingMsg === 'function') {
+                                Dashboard.hideLoadingMsg();
+                            }
+                        });
+
+                    return false;
+                }
+
+                var page = getElement('#smartBranchingConfigPage');
+                if (page) {
+                    page.addEventListener('pageshow', loadConfig);
+                }
+
+                var form = getElement('#smartBranchingConfigForm');
+                if (form) {
+                    form.addEventListener('submit', saveConfig);
+                }
+            })();
+        </script>
+    </div>
 </body>
 </html>

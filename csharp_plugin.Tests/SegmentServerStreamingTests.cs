@@ -17,6 +17,7 @@ using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Serialization;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 using ZstdSharp;
@@ -115,70 +116,42 @@ public class SegmentServerStreamingTests
     }
 
     [Fact]
-    public void OpenMediaSource_GetStream_ReadProducesResolvedPayload_AndIsNotMemoryStream()
+    public void OpenMediaSource_ProducesCachedProgressiveMp4_WhenFfmpegAvailable()
     {
+        if (!FfmpegTestHelpers.IsAvailable())
+            return;
+
         CreatePluginContext();
+
+        var segOne = FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200));
+        var segTwo = FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200));
 
         var manifestJson = """
             {
               "movie_id": "movie-123",
               "title": "Example",
-              "duration_ms": 4000,
+              "duration_ms": 400,
               "profiles": {
-                "child": { "filters": {} },
-                "adult": { "filters": {} }
+                "child": { "filters": {} }
               },
               "segments": [
                 {
                   "id": "seg-001",
                   "start_ms": 0,
-                  "end_ms": 1000,
+                  "end_ms": 200,
                   "tags": [],
                   "risk": "safe",
                   "is_filler": false,
-                  "profiles": {
-                    "child": { "action": "play", "segment_id": "seg-001" }
-                  }
+                  "profiles": { "child": { "action": "play", "segment_id": "seg-001" } }
                 },
                 {
                   "id": "seg-002",
-                  "start_ms": 1000,
-                  "end_ms": 2000,
-                  "tags": ["violence"],
-                  "risk": "mature",
-                  "is_filler": false,
-                  "profiles": {
-                    "child": { "action": "skip", "segment_id": "seg-002" }
-                  }
-                },
-                {
-                  "id": "seg-003",
-                  "start_ms": 2000,
-                  "end_ms": 3000,
-                  "tags": ["language"],
-                  "risk": "mature",
-                  "is_filler": false,
-                  "profiles": {
-                    "child": { "action": "swap", "segment_id": "fill-003" }
-                  }
-                },
-                {
-                  "id": "fill-003",
-                  "start_ms": 2000,
-                  "end_ms": 3000,
-                  "tags": [],
-                  "risk": "safe",
-                  "is_filler": true,
-                  "profiles": {}
-                },
-                {
-                  "id": "seg-004",
-                  "start_ms": 3000,
-                  "end_ms": 4000,
+                  "start_ms": 200,
+                  "end_ms": 400,
                   "tags": [],
                   "risk": "safe",
                   "is_filler": false,
-                  "profiles": {}
+                  "profiles": { "child": { "action": "play", "segment_id": "seg-002" } }
                 }
               ]
             }
@@ -186,27 +159,85 @@ public class SegmentServerStreamingTests
 
         using var bvfFile = CreateTempBvf(
             manifestJson,
-            ("seg-001", "AAAA"),
-            ("seg-002", "SKIP"),
-            ("seg-003", "MMMM"),
-            ("fill-003", "FILL"),
-            ("seg-004", "ZZ"));
+            ("seg-001", segOne),
+            ("seg-002", segTwo));
 
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths());
+        var paths = new TestApplicationPaths();
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, paths);
         var liveStream = OpenMediaSource(server, bvfFile, "child");
+        var mediaSource = liveStream.MediaSource;
 
-        using var stream = liveStream.GetStream();
-        using var buffer = new MemoryStream();
-        stream.CopyTo(buffer);
+        Assert.Equal(MediaBrowser.Model.MediaInfo.MediaProtocol.File, mediaSource.Protocol);
+        Assert.False(mediaSource.IsRemote);
+        Assert.EndsWith(".mp4", mediaSource.Path, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(mediaSource.Path));
+        Assert.True(new FileInfo(mediaSource.Path).Length > 0);
 
-        Assert.False(stream is MemoryStream);
-        Assert.Equal("AAAAFILLZZ", Encoding.UTF8.GetString(buffer.ToArray()));
+        var secondOpen = OpenMediaSource(server, bvfFile, "child");
+        Assert.Equal(mediaSource.Path, secondOpen.MediaSource.Path);
     }
 
     [Fact]
-    public void OpenMediaSource_GetStream_SeekWorksWithinResolvedPayload()
+    public async Task GetMediaSources_ReturnsReadyCachedSource_AfterPlaybackCacheBuilt()
     {
-        CreatePluginContext();
+        if (!FfmpegTestHelpers.IsAvailable())
+            return;
+
+        CreatePluginContext(BuildConfig(yearsAgo: 12, sex: "male", profileOverride: "child"));
+
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 400,
+              "profiles": {
+                "child": { "filters": {} }
+              },
+              "segments": [
+                {
+                  "id": "seg-001",
+                  "start_ms": 0,
+                  "end_ms": 200,
+                  "tags": [],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": { "child": { "action": "play", "segment_id": "seg-001" } }
+                },
+                {
+                  "id": "seg-002",
+                  "start_ms": 200,
+                  "end_ms": 400,
+                  "tags": [],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": { "child": { "action": "play", "segment_id": "seg-002" } }
+                }
+              ]
+            }
+            """;
+
+        using var bvfFile = CreateTempBvf(
+            manifestJson,
+            ("seg-001", FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200))),
+            ("seg-002", FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200))));
+
+        var paths = new TestApplicationPaths();
+        var httpContextAccessor = CreateJellyfinHttpContextAccessor(TestUserId);
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, paths, httpContextAccessor);
+        var opened = OpenMediaSource(server, bvfFile, "child");
+
+        var sourcesBefore = (await server.GetMediaSources(new Video { Path = bvfFile }, CancellationToken.None)).ToList();
+        var ready = Assert.Single(sourcesBefore);
+        Assert.False(ready.RequiresOpening);
+        Assert.EndsWith(".mp4", ready.Path, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(opened.MediaSource.Path, ready.Path);
+        Assert.Equal(2000L * TimeSpan.TicksPerMillisecond, ready.RunTimeTicks);
+    }
+
+    [Fact]
+    public async Task GetMediaSources_WithJellyfinUserIdClaim_ReturnsResolvedProfileOnly()
+    {
+        CreatePluginContext(BuildConfig(yearsAgo: 3, sex: "male", profileOverride: "adult"));
 
         var manifestJson = """
             {
@@ -217,83 +248,20 @@ public class SegmentServerStreamingTests
                 "child": { "filters": {} },
                 "adult": { "filters": {} }
               },
-              "segments": [
-                {
-                  "id": "seg-001",
-                  "start_ms": 0,
-                  "end_ms": 1000,
-                  "tags": [],
-                  "risk": "safe",
-                  "is_filler": false,
-                  "profiles": {
-                    "child": { "action": "play", "segment_id": "seg-001" }
-                  }
-                },
-                {
-                  "id": "seg-002",
-                  "start_ms": 1000,
-                  "end_ms": 2000,
-                  "tags": ["violence"],
-                  "risk": "mature",
-                  "is_filler": false,
-                  "profiles": {
-                    "child": { "action": "skip", "segment_id": "seg-002" }
-                  }
-                },
-                {
-                  "id": "seg-003",
-                  "start_ms": 2000,
-                  "end_ms": 3000,
-                  "tags": ["language"],
-                  "risk": "mature",
-                  "is_filler": false,
-                  "profiles": {
-                    "child": { "action": "swap", "segment_id": "fill-003" }
-                  }
-                },
-                {
-                  "id": "fill-003",
-                  "start_ms": 2000,
-                  "end_ms": 3000,
-                  "tags": [],
-                  "risk": "safe",
-                  "is_filler": true,
-                  "profiles": {}
-                },
-                {
-                  "id": "seg-004",
-                  "start_ms": 3000,
-                  "end_ms": 4000,
-                  "tags": [],
-                  "risk": "safe",
-                  "is_filler": false,
-                  "profiles": {}
-                }
-              ]
+              "segments": []
             }
             """;
 
-        using var bvfFile = CreateTempBvf(
-            manifestJson,
-            ("seg-001", "AAAA"),
-            ("seg-002", "SKIP"),
-            ("seg-003", "MMMM"),
-            ("fill-003", "FILL"),
-            ("seg-004", "ZZ"));
+        using var bvfFile = CreateTempBvf(manifestJson, ("seg-001", "AAAA"));
+        var httpContextAccessor = CreateJellyfinHttpContextAccessor(TestUserId);
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths(), httpContextAccessor);
+        var item = new Video { Path = bvfFile };
 
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths());
-        var liveStream = OpenMediaSource(server, bvfFile, "child");
+        var sources = (await server.GetMediaSources(item, CancellationToken.None)).ToList();
 
-        using var stream = liveStream.GetStream();
-        var newPosition = stream.Seek(4, SeekOrigin.Begin);
-        var readBuffer = new byte[4];
-        var bytesRead = stream.Read(readBuffer, 0, readBuffer.Length);
-
-        Assert.Equal(4, newPosition);
-        Assert.False(stream is MemoryStream);
-        Assert.Equal(8, stream.Position);
-        Assert.Equal(4, bytesRead);
-        Assert.Equal("FILL", Encoding.UTF8.GetString(readBuffer, 0, bytesRead));
+        var source = Assert.Single(sources);
+        Assert.Equal("Smart Branch (auto: adult)", source.Name);
+        Assert.Equal("adult", DecodeProfileFromToken(source.OpenToken));
     }
 
     [Fact]
@@ -327,6 +295,8 @@ public class SegmentServerStreamingTests
         var source = Assert.Single(sources);
         Assert.Equal("Smart Branch (auto: child)", source.Name);
         Assert.Equal("child", DecodeProfileFromToken(source.OpenToken));
+        Assert.True(Guid.TryParse(source.Id, out _));
+        Assert.False(source.SupportsTranscoding);
     }
 
     [Fact]
@@ -400,19 +370,31 @@ public class SegmentServerStreamingTests
     private static PluginConfiguration BuildConfig(int yearsAgo, string sex, string? profileOverride = null)
     {
         var userId = TestUserId.ToString();
-        return new PluginConfiguration
+        var config = new PluginConfiguration { DefaultProfile = "adult" };
+        config.SetUserProfiles(new Dictionary<string, UserBranchProfile>
         {
-            DefaultProfile = "adult",
-            UserProfiles = new Dictionary<string, UserBranchProfile>
+            [userId] = new()
             {
-                [userId] = new()
-                {
-                    Birthday = DateOnly.FromDateTime(DateTime.UtcNow).AddYears(-yearsAgo).ToString("yyyy-MM-dd"),
-                    Sex = sex,
-                    ProfileOverride = profileOverride
-                }
+                Birthday = DateOnly.FromDateTime(DateTime.UtcNow).AddYears(-yearsAgo).ToString("yyyy-MM-dd"),
+                Sex = sex,
+                ProfileOverride = profileOverride
             }
+        });
+        return config;
+    }
+
+    private static HttpContextAccessor CreateJellyfinHttpContextAccessor(Guid userId)
+    {
+        var claims = new[]
+        {
+            new Claim(SegmentServer.JellyfinUserIdClaimType, userId.ToString()),
         };
+        var context = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(new ClaimsIdentity(claims)),
+        };
+
+        return new HttpContextAccessor { HttpContext = context };
     }
 
     private static HttpContextAccessor CreateAuthenticatedHttpContextAccessor(Guid userId, string userName)
@@ -460,6 +442,11 @@ public class SegmentServerStreamingTests
     }
 
     private static TempFile CreateTempBvf(string manifestJson, params (string SegmentId, string PayloadText)[] segments)
+        => CreateTempBvf(
+            manifestJson,
+            segments.Select(segment => (segment.SegmentId, Encoding.UTF8.GetBytes(segment.PayloadText))).ToArray());
+
+    private static TempFile CreateTempBvf(string manifestJson, params (string SegmentId, byte[] Payload)[] segments)
     {
         var manifestBytes = Encoding.UTF8.GetBytes(manifestJson);
         byte[] compressedManifest;
@@ -477,9 +464,8 @@ public class SegmentServerStreamingTests
         var nextDataOffset = manifestOffset + manifestLength;
 
         var assetBlocks = new List<(string SegmentId, byte[] Block, ulong DataOffset, ulong DataLength)>(segments.Length);
-        foreach (var (segmentId, payloadText) in segments)
+        foreach (var (segmentId, payload) in segments)
         {
-            var payload = Encoding.UTF8.GetBytes(payloadText);
             var block = CreateAssetBlock(segmentId, payload);
             assetBlocks.Add((segmentId, block, nextDataOffset, (ulong)block.Length));
             nextDataOffset += (ulong)block.Length;

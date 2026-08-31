@@ -7,11 +7,12 @@ namespace Jellyfin.Plugin.SmartBranching;
 
 /// <summary>
 /// Exposes resolved BVF segment payloads as one logical stream without buffering
-/// the full movie into memory.
+/// the full movie into memory. fMP4 segment inits are stripped after the first asset.
 /// </summary>
 public sealed class ResolvedSegmentStream : Stream
 {
     private const int AssetBlockHeaderSize = 32;
+    private const int MaxPayloadProbeSize = 1024 * 1024;
 
     private readonly FileStream _fileStream;
     private readonly SegmentSlice[] _segments;
@@ -29,12 +30,12 @@ public sealed class ResolvedSegmentStream : Stream
             throw new ArgumentNullException(nameof(segments));
 
         _fileStream = File.OpenRead(bvfPath);
-        _segments = BuildSegmentSlices(segments);
+        _segments = BuildSegmentSlices(_fileStream, segments);
 
         long totalLength = 0;
         foreach (var segment in _segments)
         {
-            totalLength += segment.PayloadLength;
+            totalLength += segment.EmitLength;
         }
 
         _length = totalLength;
@@ -88,7 +89,7 @@ public sealed class ResolvedSegmentStream : Stream
 
             var segment = _segments[segmentIndex];
             var offsetInSegment = _position - segment.LogicalStart;
-            var bytesAvailable = segment.PayloadLength - offsetInSegment;
+            var bytesAvailable = segment.EmitLength - offsetInSegment;
             var bytesToRead = (int)Math.Min(remaining, bytesAvailable);
 
             EnsureFilePosition(segment, offsetInSegment, segmentIndex);
@@ -147,7 +148,7 @@ public sealed class ResolvedSegmentStream : Stream
         base.Dispose(disposing);
     }
 
-    private static SegmentSlice[] BuildSegmentSlices(IReadOnlyList<ResolvedSegment> segments)
+    private static SegmentSlice[] BuildSegmentSlices(FileStream fileStream, IReadOnlyList<ResolvedSegment> segments)
     {
         var slices = new SegmentSlice[segments.Count];
         long logicalStart = 0;
@@ -161,9 +162,26 @@ public sealed class ResolvedSegmentStream : Stream
 
             var payloadLength = checked((long)segment.DataLength - AssetBlockHeaderSize);
             var payloadOffset = checked((long)segment.DataOffset + AssetBlockHeaderSize);
+            var payloadProbeLength = (int)Math.Min(payloadLength, MaxPayloadProbeSize);
 
-            slices[i] = new SegmentSlice(logicalStart, payloadOffset, payloadLength);
-            logicalStart += payloadLength;
+            fileStream.Seek(payloadOffset, SeekOrigin.Begin);
+            var probeBuffer = new byte[payloadProbeLength];
+            var bytesRead = fileStream.Read(probeBuffer, 0, payloadProbeLength);
+            if (bytesRead <= 0)
+                throw new InvalidDataException($"Resolved segment '{segment.SegmentId}' has an empty payload.");
+
+            var probeSpan = probeBuffer.AsSpan(0, bytesRead);
+            var (emitStart, emitLength) = Fmp4ConcatHelper.GetEmitRange(
+                probeSpan,
+                isFirstSegment: i == 0,
+                isLastSegment: i == segments.Count - 1);
+
+            // If we only probed part of the payload, preserve any trailing bytes.
+            if (payloadLength > bytesRead && emitStart + emitLength == bytesRead)
+                emitLength = payloadLength - emitStart;
+
+            slices[i] = new SegmentSlice(logicalStart, payloadOffset, emitStart, emitLength);
+            logicalStart += emitLength;
         }
 
         return slices;
@@ -171,7 +189,7 @@ public sealed class ResolvedSegmentStream : Stream
 
     private void EnsureFilePosition(SegmentSlice segment, long offsetInSegment, int segmentIndex)
     {
-        var filePosition = segment.PayloadOffset + offsetInSegment;
+        var filePosition = segment.PayloadOffset + segment.EmitStart + offsetInSegment;
         if (_currentSegmentIndex != segmentIndex || _fileStream.Position != filePosition)
         {
             _fileStream.Seek(filePosition, SeekOrigin.Begin);
@@ -185,7 +203,7 @@ public sealed class ResolvedSegmentStream : Stream
         {
             var segment = _segments[i];
             if (logicalPosition >= segment.LogicalStart &&
-                logicalPosition < segment.LogicalStart + segment.PayloadLength)
+                logicalPosition < segment.LogicalStart + segment.EmitLength)
             {
                 return i;
             }
@@ -199,5 +217,9 @@ public sealed class ResolvedSegmentStream : Stream
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
 
-    private readonly record struct SegmentSlice(long LogicalStart, long PayloadOffset, long PayloadLength);
+    private readonly record struct SegmentSlice(
+        long LogicalStart,
+        long PayloadOffset,
+        long EmitStart,
+        long EmitLength);
 }

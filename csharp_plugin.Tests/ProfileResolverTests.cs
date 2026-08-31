@@ -66,6 +66,26 @@ public class ProfileResolverTests
         Assert.Equal("child", result);
     }
 
+    [Fact]
+    public void ResolveProfile_ProfileOverride_WorksWhenConfigUserIdHasNoDashes()
+    {
+        var userId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+        var config = new PluginConfiguration { DefaultProfile = "child" };
+        config.SetUserProfiles(new Dictionary<string, UserBranchProfile>
+        {
+            [userId.ToString("N")] = new()
+            {
+                Birthday = DateOnly.FromDateTime(DateTime.UtcNow).AddYears(-3).ToString("yyyy-MM-dd"),
+                ProfileOverride = "adult",
+            }
+        });
+        CreatePluginContext(config);
+
+        var result = new ProfileResolver().ResolveProfile(new UserDto { Id = userId }, CreateManifest());
+
+        Assert.Equal("adult", result);
+    }
+
     private static SmartBranchingPlugin CreatePluginContext(PluginConfiguration configuration)
     {
         var plugin = new SmartBranchingPlugin(new TestApplicationPaths(), new TestXmlSerializer());
@@ -76,19 +96,17 @@ public class ProfileResolverTests
     private static PluginConfiguration BuildConfig(int yearsAgo, string sex, string? profileOverride = null)
     {
         var userId = TestUserId.ToString();
-        return new PluginConfiguration
+        var config = new PluginConfiguration { DefaultProfile = "adult" };
+        config.SetUserProfiles(new Dictionary<string, UserBranchProfile>
         {
-            DefaultProfile = "adult",
-            UserProfiles = new Dictionary<string, UserBranchProfile>
+            [userId] = new()
             {
-                [userId] = new()
-                {
-                    Birthday = DateOnly.FromDateTime(DateTime.UtcNow).AddYears(-yearsAgo).ToString("yyyy-MM-dd"),
-                    Sex = sex,
-                    ProfileOverride = profileOverride
-                }
+                Birthday = DateOnly.FromDateTime(DateTime.UtcNow).AddYears(-yearsAgo).ToString("yyyy-MM-dd"),
+                Sex = sex,
+                ProfileOverride = profileOverride
             }
-        };
+        });
+        return config;
     }
 
     private static UserDto CreateUser()
