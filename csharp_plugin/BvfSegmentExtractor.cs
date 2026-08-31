@@ -10,7 +10,7 @@ namespace Jellyfin.Plugin.SmartBranching;
 /// </summary>
 internal static class BvfSegmentExtractor
 {
-    private const int AssetBlockHeaderSize = 32;
+    internal const int AssetBlockHeaderSize = 32;
 
     /// <summary>
     /// Writes each resolved segment payload to <paramref name="outputDirectory"/>.

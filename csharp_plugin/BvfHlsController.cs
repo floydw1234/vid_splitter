@@ -40,10 +40,14 @@ public sealed class BvfHlsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult GetPlaylist([FromRoute] string token)
     {
-        if (!TryResolve(token, out _, out var segments))
+        if (!TryResolve(token, out var bvfPath, out var profileKey, out var segments))
             return NotFound();
 
-        var playlist = BvfHlsPlaylistBuilder.Build(segments, BuildQuerySuffix());
+        var timeline = TryGetTimeline(bvfPath, profileKey, segments);
+        var playlist = BvfHlsPlaylistBuilder.Build(
+            segments,
+            BuildQuerySuffix(),
+            timeline?.SegmentDurationsSeconds);
         return Content(playlist, PlaylistContentType);
     }
 
@@ -55,7 +59,7 @@ public sealed class BvfHlsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult GetInitSegment([FromRoute] string token)
     {
-        if (!TryResolve(token, out var bvfPath, out var segments) || segments.Count == 0)
+        if (!TryResolve(token, out var bvfPath, out _, out var segments) || segments.Count == 0)
             return NotFound();
 
         var payload = BvfSegmentExtractor.ReadSegmentPayload(bvfPath, segments[0]);
@@ -77,7 +81,7 @@ public sealed class BvfHlsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult GetMediaSegment([FromRoute] string token, [FromRoute] int index)
     {
-        if (!TryResolve(token, out var bvfPath, out var segments))
+        if (!TryResolve(token, out var bvfPath, out var profileKey, out var segments))
             return NotFound();
 
         if (index < 0 || index >= segments.Count)
@@ -85,12 +89,40 @@ public sealed class BvfHlsController : ControllerBase
 
         var payload = BvfSegmentExtractor.ReadSegmentPayload(bvfPath, segments[index]);
         var (start, length) = Fmp4ConcatHelper.GetMediaRange(payload);
-        return File(Slice(payload, start, length), SegmentContentType);
+        var media = Slice(payload, start, length);
+
+        // Segment assets are encoded independently and all start at tfdt 0; shift
+        // this segment's fragments to its position on the continuous timeline.
+        var timeline = TryGetTimeline(bvfPath, profileKey, segments);
+        if (timeline != null)
+        {
+            Fmp4TimestampRewriter.ApplyTimestampOffset(
+                media,
+                timeline.Tracks,
+                timeline.CumulativeVideoTicks[index],
+                timeline.VideoTimescale);
+        }
+
+        return File(media, SegmentContentType);
     }
 
-    private bool TryResolve(string token, out string bvfPath, out List<ResolvedSegment> segments)
+    private BvfHlsTimeline? TryGetTimeline(string bvfPath, string profileKey, List<ResolvedSegment> segments)
+    {
+        try
+        {
+            return _segmentServer.GetHlsTimeline(bvfPath, profileKey, segments);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to build HLS timeline for {Path} ({Profile})", bvfPath, profileKey);
+            return null;
+        }
+    }
+
+    private bool TryResolve(string token, out string bvfPath, out string profileKey, out List<ResolvedSegment> segments)
     {
         bvfPath = string.Empty;
+        profileKey = string.Empty;
         segments = new List<ResolvedSegment>();
 
         if (Plugin.Instance?.Configuration.Enabled == false)
@@ -98,12 +130,13 @@ public sealed class BvfHlsController : ControllerBase
 
         try
         {
-            var (decodedPath, profileKey) = SegmentServer.DecodeToken(token);
+            var (decodedPath, decodedProfile) = SegmentServer.DecodeToken(token);
             if (!System.IO.File.Exists(decodedPath))
                 return false;
 
             bvfPath = decodedPath;
-            segments = _segmentServer.ResolveSegmentsForProfile(decodedPath, profileKey);
+            profileKey = decodedProfile;
+            segments = _segmentServer.ResolveSegmentsForProfile(decodedPath, decodedProfile);
             return segments.Count > 0;
         }
         catch (Exception ex)

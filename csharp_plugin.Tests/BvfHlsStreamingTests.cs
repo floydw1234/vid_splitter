@@ -35,40 +35,35 @@ public class BvfHlsPlaylistBuilderTests
     }
 
     [Fact]
-    public void Build_WithSkippedContentGap_InsertsDiscontinuity()
+    public void Build_WithGapsAndSwaps_EmitsNoDiscontinuities()
     {
+        // Timestamps are rewritten into one continuous timeline server-side, so
+        // skips and swaps must not produce discontinuity tags.
         var segments = new[]
         {
             MakeSegment(startSec: 0, endSec: 5, durationMs: 5000),
-            // Segment covering 5-10s was skipped by the profile.
-            MakeSegment(startSec: 10, endSec: 15, durationMs: 5000),
+            MakeSegment(startSec: 10, endSec: 15, durationMs: 5000, isSwapped: true),
+            MakeSegment(startSec: 20, endSec: 25, durationMs: 5000),
         };
 
         var playlist = BvfHlsPlaylistBuilder.Build(segments, string.Empty);
 
-        var lines = playlist.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Select(line => line.TrimEnd('\r'))
-            .ToArray();
-        var discontinuityIndex = Array.IndexOf(lines, "#EXT-X-DISCONTINUITY");
-        Assert.True(discontinuityIndex > 0, "expected a discontinuity tag");
-        Assert.Equal("0.m4s", lines[discontinuityIndex - 1]);
-        Assert.Equal(1, lines.Count(line => line == "#EXT-X-DISCONTINUITY"));
+        Assert.DoesNotContain("#EXT-X-DISCONTINUITY", playlist, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Build_WithSwappedSegment_InsertsDiscontinuityAroundIt()
+    public void Build_WithExactDurations_UsesThemForExtinf()
     {
         var segments = new[]
         {
             MakeSegment(startSec: 0, endSec: 5, durationMs: 5000),
-            MakeSegment(startSec: 5, endSec: 10, durationMs: 5000, isSwapped: true),
-            MakeSegment(startSec: 10, endSec: 15, durationMs: 5000),
+            MakeSegment(startSec: 5, endSec: 10, durationMs: 5000),
         };
 
-        var playlist = BvfHlsPlaylistBuilder.Build(segments, string.Empty);
+        var playlist = BvfHlsPlaylistBuilder.Build(segments, string.Empty, new[] { 5.005, 4.879583 });
 
-        var count = playlist.Split('\n').Count(line => line.TrimEnd('\r') == "#EXT-X-DISCONTINUITY");
-        Assert.Equal(2, count);
+        Assert.Contains("#EXTINF:5.005,", playlist, StringComparison.Ordinal);
+        Assert.Contains("#EXTINF:4.879583,", playlist, StringComparison.Ordinal);
     }
 
     private static ResolvedSegment MakeSegment(
@@ -112,4 +107,90 @@ public class Fmp4RangeTests
         var (_, length) = Fmp4ConcatHelper.GetInitRange(payload);
         Assert.Equal(0, length);
     }
+}
+
+public class Fmp4TimestampRewriterTests
+{
+    [Fact]
+    public void ParseTracks_SumDurations_AndOffsetTimestamps_RoundTrip()
+    {
+        if (!FfmpegTestHelpers.IsAvailable())
+            return;
+
+        var payload = FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200));
+
+        var (_, initLength) = Fmp4ConcatHelper.GetInitRange(payload);
+        var tracks = Fmp4TimestampRewriter.ParseTracks(payload.AsSpan(0, (int)initLength));
+        var video = Assert.Single(tracks);
+        Assert.True(video.IsVideo);
+        Assert.True(video.Timescale > 0);
+
+        using var stream = new System.IO.MemoryStream(payload);
+        var durationTicks = Fmp4TimestampRewriter.SumTrackDurationTicks(stream, 0, payload.Length, video.TrackId);
+        var durationSeconds = durationTicks / (double)video.Timescale;
+        Assert.InRange(durationSeconds, 0.1, 0.4);
+
+        var (mediaStart, mediaLength) = Fmp4ConcatHelper.GetMediaRange(payload);
+        var media = payload.AsSpan((int)mediaStart, (int)mediaLength).ToArray();
+
+        var baselineTfdt = ReadFirstTfdt(media);
+        Assert.Equal(0UL, baselineTfdt);
+
+        Fmp4TimestampRewriter.ApplyTimestampOffset(media, tracks, durationTicks, video.Timescale);
+        Assert.Equal(durationTicks, ReadFirstTfdt(media));
+    }
+
+    internal static ulong ReadFirstTfdt(byte[] media)
+    {
+        // Walk moof > traf > tfdt for the first fragment.
+        var offset = 0;
+        while (offset + 8 <= media.Length)
+        {
+            var size = ReadUInt32(media, offset);
+            var type = Encoding.ASCII.GetString(media, offset + 4, 4);
+            if (type == "moof")
+            {
+                var inner = offset + 8;
+                while (inner + 8 <= offset + size)
+                {
+                    var innerSize = ReadUInt32(media, inner);
+                    if (Encoding.ASCII.GetString(media, inner + 4, 4) == "traf")
+                    {
+                        var trafChild = inner + 8;
+                        while (trafChild + 8 <= inner + innerSize)
+                        {
+                            var childSize = ReadUInt32(media, trafChild);
+                            if (Encoding.ASCII.GetString(media, trafChild + 4, 4) == "tfdt")
+                            {
+                                var version = media[trafChild + 8];
+                                if (version == 1)
+                                {
+                                    ulong value = 0;
+                                    for (var i = 0; i < 8; i++)
+                                        value = (value << 8) | media[trafChild + 12 + i];
+                                    return value;
+                                }
+
+                                return ReadUInt32(media, trafChild + 12);
+                            }
+
+                            trafChild += (int)childSize;
+                        }
+                    }
+
+                    inner += (int)innerSize;
+                }
+            }
+
+            offset += (int)size;
+        }
+
+        throw new InvalidOperationException("no tfdt found");
+    }
+
+    private static uint ReadUInt32(byte[] buffer, int offset)
+        => ((uint)buffer[offset] << 24)
+           | ((uint)buffer[offset + 1] << 16)
+           | ((uint)buffer[offset + 2] << 8)
+           | buffer[offset + 3];
 }

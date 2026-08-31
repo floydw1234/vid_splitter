@@ -38,6 +38,7 @@ public class SegmentServer : IMediaSourceProvider
     private readonly ILogger<SegmentServer> _logger;
     private readonly ProfileResolver _profileResolver;
     private readonly BvfManifestCache _bvfManifestCache = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, BvfHlsTimeline> _hlsTimelines = new();
     private readonly BvfPlaybackRemuxer _playbackRemuxer;
     private readonly IHttpContextAccessor? _httpContextAccessor;
 
@@ -88,6 +89,7 @@ public class SegmentServer : IMediaSourceProvider
     {
         _bvfManifestCache.Clear();
         _playbackRemuxer.ClearCache();
+        _hlsTimelines.Clear();
         _logger.LogInformation("BVF manifest and playback caches cleared");
     }
 
@@ -338,6 +340,61 @@ public class SegmentServer : IMediaSourceProvider
 
     internal List<ResolvedSegment> ResolveSegmentsForProfile(string bvfPath, string profileKey)
         => ResolveAllSegmentsForProfile(bvfPath, profileKey);
+
+    /// <summary>
+    /// Returns the cached HLS timeline (exact per-segment durations and cumulative
+    /// timestamp offsets) for a resolved profile, building it on first use.
+    /// </summary>
+    internal BvfHlsTimeline GetHlsTimeline(
+        string bvfPath,
+        string profileKey,
+        IReadOnlyList<ResolvedSegment> segments)
+    {
+        var fileInfo = new FileInfo(bvfPath);
+        var cacheKey = $"{bvfPath}|{profileKey}|{fileInfo.LastWriteTimeUtc.Ticks}|{fileInfo.Length}";
+        return _hlsTimelines.GetOrAdd(cacheKey, _ => BuildHlsTimeline(bvfPath, segments));
+    }
+
+    private static BvfHlsTimeline BuildHlsTimeline(string bvfPath, IReadOnlyList<ResolvedSegment> segments)
+    {
+        var firstPayload = BvfSegmentExtractor.ReadSegmentPayload(bvfPath, segments[0]);
+        var (_, initLength) = Fmp4ConcatHelper.GetInitRange(firstPayload);
+        if (initLength <= 0)
+            throw new InvalidDataException("BVF segment payloads are not fMP4; cannot build an HLS timeline.");
+
+        var tracks = Fmp4TimestampRewriter.ParseTracks(firstPayload.AsSpan(0, (int)initLength));
+        if (tracks.Count == 0)
+            throw new InvalidDataException("No tracks found in BVF init segment.");
+
+        var video = tracks.FirstOrDefault(track => track.IsVideo);
+        if (video.TrackId == 0)
+            video = tracks[0];
+
+        var cumulativeTicks = new ulong[segments.Count + 1];
+        var durationsSeconds = new double[segments.Count];
+
+        using var bvfStream = File.OpenRead(bvfPath);
+        for (var i = 0; i < segments.Count; i++)
+        {
+            var payloadOffset = checked((long)segments[i].DataOffset + BvfSegmentExtractor.AssetBlockHeaderSize);
+            var payloadLength = checked((long)segments[i].DataLength - BvfSegmentExtractor.AssetBlockHeaderSize);
+            var ticks = Fmp4TimestampRewriter.SumTrackDurationTicks(bvfStream, payloadOffset, payloadLength, video.TrackId);
+
+            cumulativeTicks[i + 1] = cumulativeTicks[i] + ticks;
+            durationsSeconds[i] = ticks > 0
+                ? ticks / (double)video.Timescale
+                : segments[i].DurationMs / 1000.0;
+        }
+
+        return new BvfHlsTimeline
+        {
+            Tracks = tracks,
+            VideoTrackId = video.TrackId,
+            VideoTimescale = video.Timescale,
+            CumulativeVideoTicks = cumulativeTicks,
+            SegmentDurationsSeconds = durationsSeconds,
+        };
+    }
 
     private List<ResolvedSegment> ResolveAllSegmentsForProfile(string bvfPath, string profileKey)
     {

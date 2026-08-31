@@ -368,6 +368,11 @@ public class SegmentServerStreamingTests
         Assert.True(segmentResult.FileContents.Length > 0);
         var firstBoxType = Encoding.ASCII.GetString(segmentResult.FileContents, 4, 4);
         Assert.NotEqual("ftyp", firstBoxType);
+        Assert.Equal(0UL, Fmp4TimestampRewriterTests.ReadFirstTfdt(segmentResult.FileContents));
+
+        // Second segment must be shifted onto the continuous timeline.
+        var secondSegment = Assert.IsType<Microsoft.AspNetCore.Mvc.FileContentResult>(controller.GetMediaSegment(token, 1));
+        Assert.True(Fmp4TimestampRewriterTests.ReadFirstTfdt(secondSegment.FileContents) > 0UL);
 
         var outOfRange = controller.GetMediaSegment(token, 99);
         Assert.IsType<Microsoft.AspNetCore.Mvc.NotFoundResult>(outOfRange);
