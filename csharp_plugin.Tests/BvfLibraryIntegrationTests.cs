@@ -124,7 +124,7 @@ public class BvfLibraryIntegrationTests
             """;
 
         using var bvfFile = CreateTempBvf(manifestJson, totalDurationMs: 4000, ("seg-001", "AAAA"));
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths());
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance);
         var item = new BvfVideo
         {
             Path = (string)bvfFile,
@@ -142,7 +142,7 @@ public class BvfLibraryIntegrationTests
     [Fact]
     public void FindBvfFile_AcceptsPrimaryBvfPath_AndLegacySibling()
     {
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths());
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance);
         var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         try

@@ -12,8 +12,6 @@ using Jellyfin.Plugin.SmartBranching.Configuration;
 using Jellyfin.Plugin.SmartBranching.Models;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Serialization;
 using Microsoft.AspNetCore.Http;
@@ -106,132 +104,13 @@ public class SegmentServerStreamingTests
             ("fill-003", "payload-fill"),
             ("seg-004", "payload-4"));
 
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths());
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance);
 
         var resolved = InvokeResolveAllSegmentsForProfile(server, bvfFile, "child");
 
         Assert.Equal(new[] { "seg-001", "fill-003", "seg-004" }, resolved.Select(segment => segment.SegmentId).ToArray());
         Assert.Equal(new[] { "play", "swap", "play" }, resolved.Select(segment => segment.Action).ToArray());
         Assert.Equal(new[] { false, true, false }, resolved.Select(segment => segment.IsSwapped).ToArray());
-    }
-
-    [Fact]
-    public void OpenMediaSource_ProducesCachedProgressiveMp4_WhenFfmpegAvailable()
-    {
-        if (!FfmpegTestHelpers.IsAvailable())
-            return;
-
-        CreatePluginContext();
-
-        var segOne = FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200));
-        var segTwo = FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200));
-
-        var manifestJson = """
-            {
-              "movie_id": "movie-123",
-              "title": "Example",
-              "duration_ms": 400,
-              "profiles": {
-                "child": { "filters": {} }
-              },
-              "segments": [
-                {
-                  "id": "seg-001",
-                  "start_ms": 0,
-                  "end_ms": 200,
-                  "tags": [],
-                  "risk": "safe",
-                  "is_filler": false,
-                  "profiles": { "child": { "action": "play", "segment_id": "seg-001" } }
-                },
-                {
-                  "id": "seg-002",
-                  "start_ms": 200,
-                  "end_ms": 400,
-                  "tags": [],
-                  "risk": "safe",
-                  "is_filler": false,
-                  "profiles": { "child": { "action": "play", "segment_id": "seg-002" } }
-                }
-              ]
-            }
-            """;
-
-        using var bvfFile = CreateTempBvf(
-            manifestJson,
-            ("seg-001", segOne),
-            ("seg-002", segTwo));
-
-        var paths = new TestApplicationPaths();
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, paths);
-        var liveStream = OpenMediaSource(server, bvfFile, "child");
-        var mediaSource = liveStream.MediaSource;
-
-        Assert.Equal(MediaBrowser.Model.MediaInfo.MediaProtocol.File, mediaSource.Protocol);
-        Assert.False(mediaSource.IsRemote);
-        Assert.EndsWith(".mp4", mediaSource.Path, StringComparison.OrdinalIgnoreCase);
-        Assert.True(File.Exists(mediaSource.Path));
-        Assert.True(new FileInfo(mediaSource.Path).Length > 0);
-
-        var secondOpen = OpenMediaSource(server, bvfFile, "child");
-        Assert.Equal(mediaSource.Path, secondOpen.MediaSource.Path);
-    }
-
-    [Fact]
-    public async Task GetMediaSources_ReturnsReadyCachedSource_AfterPlaybackCacheBuilt()
-    {
-        if (!FfmpegTestHelpers.IsAvailable())
-            return;
-
-        CreatePluginContext(BuildConfig(yearsAgo: 12, sex: "male", profileOverride: "child"));
-
-        var manifestJson = """
-            {
-              "movie_id": "movie-123",
-              "title": "Example",
-              "duration_ms": 400,
-              "profiles": {
-                "child": { "filters": {} }
-              },
-              "segments": [
-                {
-                  "id": "seg-001",
-                  "start_ms": 0,
-                  "end_ms": 200,
-                  "tags": [],
-                  "risk": "safe",
-                  "is_filler": false,
-                  "profiles": { "child": { "action": "play", "segment_id": "seg-001" } }
-                },
-                {
-                  "id": "seg-002",
-                  "start_ms": 200,
-                  "end_ms": 400,
-                  "tags": [],
-                  "risk": "safe",
-                  "is_filler": false,
-                  "profiles": { "child": { "action": "play", "segment_id": "seg-002" } }
-                }
-              ]
-            }
-            """;
-
-        using var bvfFile = CreateTempBvf(
-            manifestJson,
-            ("seg-001", FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200))),
-            ("seg-002", FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200))));
-
-        var paths = new TestApplicationPaths();
-        var httpContextAccessor = CreateJellyfinHttpContextAccessor(TestUserId);
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, paths, httpContextAccessor);
-        var opened = OpenMediaSource(server, bvfFile, "child");
-
-        var sourcesBefore = (await server.GetMediaSources(new Video { Path = bvfFile }, CancellationToken.None)).ToList();
-        var ready = Assert.Single(sourcesBefore);
-        Assert.False(ready.RequiresOpening);
-        Assert.EndsWith(".mp4", ready.Path, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(opened.MediaSource.Path, ready.Path);
-        Assert.Equal(2000L * TimeSpan.TicksPerMillisecond, ready.RunTimeTicks);
     }
 
     [Fact]
@@ -279,7 +158,7 @@ public class SegmentServerStreamingTests
             TestUserId,
             accessToken: "secret-token",
             host: "media.example.com:8096");
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths(), httpContextAccessor);
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, httpContextAccessor);
 
         var sources = (await server.GetMediaSources(new Video { Path = bvfFile }, CancellationToken.None)).ToList();
 
@@ -341,7 +220,7 @@ public class SegmentServerStreamingTests
             ("seg-001", FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200))),
             ("seg-002", FfmpegTestHelpers.CreateFragmentedMp4(TimeSpan.FromMilliseconds(200))));
 
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths());
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance);
         var controller = new BvfHlsController(server, NullLogger<BvfHlsController>.Instance)
         {
             ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext
@@ -401,7 +280,7 @@ public class SegmentServerStreamingTests
 
         using var bvfFile = CreateTempBvf(manifestJson, ("seg-001", "AAAA"));
         var httpContextAccessor = CreateJellyfinHttpContextAccessor(TestUserId);
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths(), httpContextAccessor);
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, httpContextAccessor);
         var item = new Video { Path = bvfFile };
 
         var sources = (await server.GetMediaSources(item, CancellationToken.None)).ToList();
@@ -434,7 +313,7 @@ public class SegmentServerStreamingTests
         File.WriteAllText(moviePath, "placeholder");
 
         var httpContextAccessor = CreateAuthenticatedHttpContextAccessor(TestUserId, "kiddo");
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths(), httpContextAccessor);
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, httpContextAccessor);
         var item = new Video { Path = moviePath };
 
         var sources = (await server.GetMediaSources(item, CancellationToken.None)).ToList();
@@ -468,7 +347,7 @@ public class SegmentServerStreamingTests
         var moviePath = Path.ChangeExtension((string)bvfFile, ".mp4");
         File.WriteAllText(moviePath, "placeholder");
 
-        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new TestApplicationPaths(), new HttpContextAccessor());
+        var server = new SegmentServer(NullLogger<SegmentServer>.Instance, new HttpContextAccessor());
         var item = new Video { Path = moviePath };
 
         var sources = (await server.GetMediaSources(item, CancellationToken.None)).ToList();
@@ -495,12 +374,6 @@ public class SegmentServerStreamingTests
         }
 
         return Assert.IsType<List<ResolvedSegment>>(result);
-    }
-
-    private static ILiveStream OpenMediaSource(SegmentServer server, string bvfPath, string profileKey)
-    {
-        var token = EncodeMediaSourceToken(bvfPath, profileKey);
-        return server.OpenMediaSource(token, new List<ILiveStream>(), CancellationToken.None).GetAwaiter().GetResult();
     }
 
     private static SmartBranchingPlugin CreatePluginContext(PluginConfiguration? configuration = null)

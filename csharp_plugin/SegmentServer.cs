@@ -9,7 +9,6 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.SmartBranching.Models;
-using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
@@ -39,21 +38,15 @@ public class SegmentServer : IMediaSourceProvider
     private readonly ProfileResolver _profileResolver;
     private readonly BvfManifestCache _bvfManifestCache = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, BvfHlsTimeline> _hlsTimelines = new();
-    private readonly BvfPlaybackRemuxer _playbackRemuxer;
     private readonly IHttpContextAccessor? _httpContextAccessor;
 
     public SegmentServer(
         ILogger<SegmentServer> logger,
-        IApplicationPaths applicationPaths,
         IHttpContextAccessor? httpContextAccessor = null)
     {
-        ArgumentNullException.ThrowIfNull(applicationPaths);
         _logger = logger;
         _profileResolver = new ProfileResolver();
         _httpContextAccessor = httpContextAccessor;
-        _playbackRemuxer = new BvfPlaybackRemuxer(
-            logger,
-            Path.Combine(applicationPaths.CachePath, "smart-branching"));
     }
 
     private BranchManifest GetBvfManifest(string bvfPath)
@@ -88,9 +81,8 @@ public class SegmentServer : IMediaSourceProvider
     public void ClearCache()
     {
         _bvfManifestCache.Clear();
-        _playbackRemuxer.ClearCache();
         _hlsTimelines.Clear();
-        _logger.LogInformation("BVF manifest and playback caches cleared");
+        _logger.LogInformation("BVF manifest and HLS timeline caches cleared");
     }
 
     public string? FindBvfFile(string itemPath)
@@ -188,67 +180,13 @@ public class SegmentServer : IMediaSourceProvider
         }
     }
 
-    public async Task<ILiveStream> OpenMediaSource(
+    public Task<ILiveStream> OpenMediaSource(
         string openToken,
         List<ILiveStream> currentLiveStreams,
         CancellationToken cancellationToken)
     {
-        if (Plugin.Instance?.Configuration.Enabled == false)
-            throw new InvalidOperationException("Smart Branching is disabled.");
-
-        try
-        {
-            var (bvfFile, profileKey) = DecodeMediaSourceToken(openToken);
-            if (!File.Exists(bvfFile))
-                throw new FileNotFoundException($"BVF file not found: {bvfFile}");
-
-            var resolvedSegments = ResolveAllSegmentsForProfile(bvfFile, profileKey);
-            if (resolvedSegments.Count == 0)
-                throw new InvalidOperationException("No playable segments found");
-
-            var playbackPath = await _playbackRemuxer
-                .GetOrCreatePlaybackFileAsync(bvfFile, profileKey, resolvedSegments, cancellationToken)
-                .ConfigureAwait(false);
-
-            long? durationTicks = null;
-            try
-            {
-                var header = BVFReader.ReadHeader(bvfFile);
-                if (header.totalDurationMs > 0)
-                    durationTicks = checked((long)header.totalDurationMs * TimeSpan.TicksPerMillisecond);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Unable to read BVF duration for {Path}", bvfFile);
-            }
-
-            var mediaSource = CreateMediaSourceInfo(
-                bvfFile,
-                profileKey,
-                resolvedSegments,
-                fallbackRunTimeTicks: durationTicks);
-            mediaSource.Path = playbackPath;
-            mediaSource.Protocol = MediaProtocol.File;
-            mediaSource.IsRemote = false;
-            mediaSource.Container = "mp4";
-            mediaSource.Size = new FileInfo(playbackPath).Length;
-            mediaSource.SupportsTranscoding = false;
-            mediaSource.SupportsDirectPlay = true;
-            mediaSource.SupportsDirectStream = true;
-            mediaSource.SupportsProbing = true;
-            mediaSource.RequiresOpening = false;
-            mediaSource.RequiresClosing = false;
-            mediaSource.RunTimeTicks = ComputeProfileRunTimeTicks(resolvedSegments) ?? durationTicks;
-
-            var liveStream = new BvfFileLiveStream(mediaSource);
-            mediaSource.LiveStreamId = liveStream.UniqueId;
-            return liveStream;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to open BVF media source");
-            throw;
-        }
+        throw new InvalidOperationException(
+            "Smart Branching serves HLS directly and does not remux a playback cache.");
     }
 
     /// <summary>
@@ -605,19 +543,14 @@ public class SegmentServer : IMediaSourceProvider
         string profileKey,
         IReadOnlyList<ResolvedSegment> resolvedSegments,
         bool isAutomaticSelection = false,
-        long? fallbackRunTimeTicks = null,
-        string? playbackPath = null)
+        long? fallbackRunTimeTicks = null)
     {
-        playbackPath ??= isAutomaticSelection
-            ? _playbackRemuxer.TryGetCachedPlaybackPath(bvfPath, profileKey, resolvedSegments)
-            : null;
-        var isReady = !string.IsNullOrEmpty(playbackPath) && File.Exists(playbackPath);
-        var mediaSource = new MediaSourceInfo
+        return new MediaSourceInfo
         {
             // HLS helpers Guid.Parse(MediaSourceId); keep this a real GUID.
             Id = CreateMediaSourceId(bvfPath, profileKey),
             Name = isAutomaticSelection ? $"Smart Branch (auto: {profileKey})" : $"Smart Branch ({profileKey})",
-            Path = isReady ? playbackPath : bvfPath,
+            Path = bvfPath,
             Protocol = MediaProtocol.File,
             Container = "mp4",
             VideoType = VideoType.VideoFile,
@@ -644,20 +577,15 @@ public class SegmentServer : IMediaSourceProvider
                 },
             },
             Bitrate = 8_000_000,
-            SupportsProbing = isReady,
+            SupportsProbing = false,
             IsRemote = false,
-            RequiresOpening = !isReady,
+            RequiresOpening = false,
             OpenToken = EncodeMediaSourceToken(bvfPath, profileKey),
-            RequiresClosing = !isReady,
+            RequiresClosing = false,
             SupportsDirectPlay = true,
-            SupportsDirectStream = true,
+            SupportsDirectStream = false,
             SupportsTranscoding = false,
         };
-
-        if (isReady)
-            mediaSource.Size = new FileInfo(playbackPath!).Length;
-
-        return mediaSource;
     }
 
     private static string CreateMediaSourceId(string bvfPath, string profileKey)
@@ -694,37 +622,5 @@ public class SegmentServer : IMediaSourceProvider
         var padded = value.Replace('-', '+').Replace('_', '/');
         padded = padded.PadRight(padded.Length + ((4 - padded.Length % 4) % 4), '=');
         return Encoding.UTF8.GetString(Convert.FromBase64String(padded));
-    }
-
-    private sealed class BvfFileLiveStream : ILiveStream
-    {
-        public BvfFileLiveStream(MediaSourceInfo mediaSource)
-        {
-            MediaSource = mediaSource;
-        }
-
-        public int ConsumerCount { get; set; }
-        public string OriginalStreamId { get; set; } = string.Empty;
-        public string TunerHostId => "SmartBranching";
-        public bool EnableStreamSharing => false;
-        public MediaSourceInfo MediaSource { get; set; }
-        public string UniqueId { get; } = Guid.NewGuid().ToString("N");
-
-        public Task Open(CancellationToken openCancellationToken) => Task.CompletedTask;
-
-        public Task Close() => Task.CompletedTask;
-
-        public Stream GetStream()
-        {
-            var path = MediaSource.Path;
-            if (string.IsNullOrEmpty(path) || !File.Exists(path))
-                throw new FileNotFoundException("BVF playback file not found.", path);
-
-            return File.OpenRead(path);
-        }
-
-        public void Dispose()
-        {
-        }
     }
 }
