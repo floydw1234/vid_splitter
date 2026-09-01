@@ -96,7 +96,7 @@ It now checks:
 ## Tests
 
 ```bash
-env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_bvf_muxer.py tools/test_bvf_player.py tests/test_cli_e2e.py
+env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_bvf_muxer.py tests/test_bvf_player.py tests/test_cli_e2e.py
 ```
 
 ## Jellyfin Smoke
