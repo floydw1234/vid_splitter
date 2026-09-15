@@ -19,6 +19,7 @@ public class PluginConfigurationSerializationTests
             FillerDirectory = "smart_branching/filler",
             NsfwThreshold = 0.75f,
             DefaultAction = "swap",
+            CustomTopics = new List<string> { "spoilers" },
         };
         config.SetUserProfiles(new Dictionary<string, UserBranchProfile>
         {
@@ -27,6 +28,8 @@ public class PluginConfigurationSerializationTests
                 Birthday = "2016-01-01",
                 Sex = "female",
                 ProfileOverride = null,
+                Topics = new List<string> { "nudity", "religion_christianity" },
+                HitAction = "skip",
             },
             ["user-2"] = new()
             {
@@ -53,9 +56,13 @@ public class PluginConfigurationSerializationTests
         Assert.Equal(2, deserialized.UserProfileEntries.Count);
         Assert.True(deserialized.TryGetUserProfile("user-1", out var first));
         Assert.Equal("female", first.Sex);
+        Assert.Equal(new[] { "nudity", "religion_christianity" }, first.Topics);
+        Assert.Equal("skip", first.HitAction);
         Assert.True(deserialized.TryGetUserProfile("user-2", out var second));
         Assert.Equal("teen_m", second.ProfileOverride);
         Assert.False(deserialized.TryGetUserProfile("missing", out _));
+        Assert.Equal(new[] { "nudity", "religion_christianity" }, deserialized.CollectAvoidedTopics());
+        Assert.Equal(new[] { "spoilers" }, deserialized.CustomTopics);
     }
 
     [Fact]

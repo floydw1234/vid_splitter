@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from analyzer.analyze import MovieAnalyzer
@@ -350,3 +351,409 @@ def test_attach_goldylocks_fillers_warns_and_falls_back_when_missing(tmp_path: P
 
     assert result == segments
     assert "Goldilocks filler video is missing" in caplog.text
+
+
+def test_attach_goldylocks_skips_segments_already_replaced_by_wan(tmp_path: Path, monkeypatch):
+    analyzer = _build_analyzer(tmp_path)
+    filler_video = tmp_path / "goldylocks.mp4"
+    filler_video.write_bytes(b"not-a-real-video")
+    analyzer.goldylocks_filler_video = filler_video
+    monkeypatch.setattr(analyzer, "_get_duration_for_path", lambda path: 30.0)
+
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 5.0,
+            "end_time": 15.0,
+            "tags": ["nudity"],
+            "risk": "mature",
+            "action": "swap",
+            "profile_segment_id": "filler_001",
+            "wan_replaced": True,
+        },
+        {
+            "id": "filler_001",
+            "start_time": 0.0,
+            "end_time": 10.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+            "is_filler": True,
+            "source_path": str(tmp_path / "wan.mp4"),
+        },
+    ]
+
+    result = analyzer._attach_goldylocks_fillers(segments)
+    assert [seg["id"] for seg in result] == ["seg_001", "filler_001"]
+
+
+def _tiny_mp4(path, duration=1.0):
+    import subprocess
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black:s=64x64:d={duration:.3f}",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return path
+
+
+def test_apply_wan_replacements_coalesces_and_attaches_one_filler(tmp_path: Path):
+    video = tmp_path / "movie.mp4"
+    _tiny_mp4(video, 1.0)
+
+    def fake_generate(*, prompt, output, video, start, duration, seed, keep_audio, image=None):
+        assert "modest clothing" in prompt
+        return _tiny_mp4(output, duration)
+
+    analyzer = _build_analyzer(
+        tmp_path,
+        wan_replace=True,
+        wan_generate=fake_generate,
+        filter_topics=("nudity",),
+    )
+    analyzer.video_path = video
+    analyzer.output_dir = tmp_path
+    analyzer.goldylocks_filler_video = tmp_path / "missing_goldylocks.mp4"
+
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "tags": [],
+            "risk": "safe",
+            "action": "play",
+        },
+        {
+            "id": "seg_002",
+            "start_time": 5.0,
+            "end_time": 10.0,
+            "tags": ["nudity"],
+            "risk": "mature",
+            "action": "swap",
+        },
+        {
+            "id": "seg_003",
+            "start_time": 10.0,
+            "end_time": 15.0,
+            "tags": ["nudity"],
+            "risk": "mature",
+            "action": "swap",
+        },
+    ]
+
+    result = analyzer._apply_wan_replacements(segments)
+    ids = [seg["id"] for seg in result]
+    assert "seg_003" not in ids
+    mature = next(seg for seg in result if seg["id"] == "seg_002")
+    filler = next(seg for seg in result if seg["id"] == "filler_001")
+    assert mature["end_time"] == 15.0
+    assert mature["profile_segment_id"] == "filler_001"
+    assert mature["wan_replaced"] is True
+    assert filler["is_filler"] is True
+    assert (tmp_path / "movie_wan_jobs.json").is_file()
+
+    profiles = analyzer._profiles_for_manifest(result)
+    assert profiles["child"]["filters"]["nudity"] == "swap"
+    assert profiles["adult"]["filters"] == {}
+
+
+def test_apply_wan_replacements_reuses_existing_chunk_files(tmp_path: Path):
+    video = tmp_path / "movie.mp4"
+    _tiny_mp4(video, 1.0)
+    clips = tmp_path / "movie_wan_clips"
+    clips.mkdir()
+    _tiny_mp4(clips / "run_001_chunk_00.mp4", 5.0)
+
+    def fake_generate(**kwargs):
+        raise AssertionError("should reuse the on-disk chunk")
+
+    analyzer = _build_analyzer(
+        tmp_path,
+        wan_replace=True,
+        wan_generate=fake_generate,
+        filter_topics=("nudity",),
+    )
+    analyzer.video_path = video
+    analyzer.output_dir = tmp_path
+
+    result = analyzer._apply_wan_replacements(
+        [
+            {
+                "id": "seg_002",
+                "start_time": 5.0,
+                "end_time": 10.0,
+                "tags": ["nudity"],
+                "risk": "mature",
+                "action": "swap",
+            }
+        ]
+    )
+    mature = next(seg for seg in result if seg["id"] == "seg_002")
+    assert mature["wan_replaced"] is True
+    assert (clips / "run_001.mp4").is_file()
+
+
+def test_wan_dry_run_writes_plan_without_changing_segments(tmp_path: Path):
+    analyzer = _build_analyzer(tmp_path, wan_replace=True, wan_dry_run=True, filter_topics=("nudity",))
+    analyzer.output_dir = tmp_path
+    segments = [
+        {
+            "id": "seg_002",
+            "start_time": 5.0,
+            "end_time": 10.0,
+            "tags": ["nudity"],
+            "risk": "mature",
+            "action": "swap",
+        },
+    ]
+    result = analyzer._apply_wan_replacements(segments)
+    assert result == segments
+    plan = json.loads((tmp_path / "movie_wan_jobs.json").read_text())
+    assert plan["dry_run"] is True
+    assert plan["jobs"][0]["segment_ids"] == ["seg_002"]
+
+
+def test_apply_wan_replacements_honors_segment_filter_and_max_run(tmp_path: Path):
+    video = tmp_path / "movie.mp4"
+    _tiny_mp4(video, 1.0)
+    calls = []
+
+    def fake_generate(*, prompt, output, video, start, duration, seed, keep_audio, image=None):
+        calls.append((start, duration))
+        return _tiny_mp4(output, duration)
+
+    analyzer = _build_analyzer(
+        tmp_path,
+        wan_replace=True,
+        wan_segments=("seg_003",),
+        wan_max_run=4.0,
+        wan_overlap=0.5,
+        wan_generate=fake_generate,
+        filter_topics=("nudity",),
+    )
+    analyzer.video_path = video
+    analyzer.output_dir = tmp_path
+    analyzer.goldylocks_filler_video = tmp_path / "missing.mp4"
+
+    segments = [
+        {
+            "id": "seg_002",
+            "start_time": 5.0,
+            "end_time": 10.0,
+            "tags": ["nudity"],
+            "risk": "mature",
+            "action": "swap",
+        },
+        {
+            "id": "seg_003",
+            "start_time": 10.0,
+            "end_time": 18.0,
+            "tags": ["nudity"],
+            "risk": "mature",
+            "action": "swap",
+        },
+    ]
+    result = analyzer._apply_wan_replacements(segments)
+    assert [seg["id"] for seg in result if not seg.get("is_filler")] == ["seg_002", "seg_003"]
+    mature = next(seg for seg in result if seg["id"] == "seg_003")
+    leftover = next(seg for seg in result if seg["id"] == "seg_002")
+    assert leftover.get("profile_segment_id") is None
+    assert mature["profile_segment_id"] == "filler_001"
+    assert len(calls) == 3
+    assert calls[0][0] == 10.0
+
+
+def test_extra_profiles_are_baked_into_manifest(tmp_path: Path):
+    from analyzer.profiles import load_profile_file
+
+    analyzer = _build_analyzer(
+        tmp_path,
+        extra_profiles=load_profile_file(
+            Path(__file__).resolve().parents[1] / "examples" / "strict_parent.json"
+        ),
+        classify_topics=False,
+    )
+    profiles = analyzer._profiles_for_manifest([])
+    assert profiles["strict_parent"]["filters"]["religion_christianity"] == "skip"
+    assert profiles["strict_parent"]["filters"]["nudity"] == "skip"
+    assert "child" in profiles
+
+
+def test_replace_mode_swap_rewrites_every_filter_value(tmp_path: Path):
+    from analyzer.profiles import load_profile_file
+
+    analyzer = _build_analyzer(
+        tmp_path,
+        replace_mode="swap",
+        extra_profiles=load_profile_file(
+            Path(__file__).resolve().parents[1] / "examples" / "strict_parent.json"
+        ),
+        classify_topics=False,
+        visual_topics=False,
+    )
+    profiles = analyzer._profiles_for_manifest([
+        {"id": "seg_001", "wan_replaced": True, "tags": ["nudity"]},
+    ])
+    assert profiles["strict_parent"]["filters"]["religion_christianity"] == "swap"
+    assert profiles["strict_parent"]["filters"]["nudity"] == "swap"
+    assert profiles["child"]["filters"]["language"] == "swap"
+    assert profiles["adult"]["filters"] == {}
+
+
+def test_skip_mode_does_not_plan_wan_jobs(tmp_path: Path):
+    analyzer = _build_analyzer(tmp_path, replace_mode="skip")
+    analyzer.output_dir = tmp_path
+    segments = [
+        {
+            "id": "seg_002",
+            "start_time": 5.0,
+            "end_time": 10.0,
+            "tags": ["nudity"],
+            "topics": [],
+            "risk": "mature",
+            "action": "skip",
+        },
+    ]
+    assert analyzer._apply_wan_replacements(segments) == segments
+    assert not (tmp_path / "movie_wan_jobs.json").exists()
+
+
+def test_apply_replace_mode_uses_tags_and_topics(tmp_path: Path):
+    from analyzer.profiles import load_profile_file
+
+    analyzer = _build_analyzer(
+        tmp_path,
+        replace_mode="skip",
+        extra_profiles=load_profile_file(
+            Path(__file__).resolve().parents[1] / "examples" / "strict_parent.json"
+        ),
+        visual_topics=False,
+        filter_topics=("religion_christianity", "nudity"),
+    )
+    result = analyzer._apply_replace_mode([
+        {"id": "seg_001", "tags": [], "topics": ["religion_christianity"]},
+        {"id": "seg_002", "tags": ["nudity"], "topics": []},
+        {"id": "seg_003", "tags": [], "topics": []},
+    ])
+    assert [seg["action"] for seg in result] == ["skip", "skip", "play"]
+
+
+def test_wan_prompt_includes_cross_and_nudity(tmp_path: Path):
+    from analyzer.profiles import load_profile_file
+
+    video = tmp_path / "movie.mp4"
+    _tiny_mp4(video, 1.0)
+    prompts = []
+
+    def fake_generate(*, prompt, output, video, start, duration, seed, keep_audio, image=None):
+        prompts.append(prompt)
+        return _tiny_mp4(output, duration)
+
+    analyzer = _build_analyzer(
+        tmp_path,
+        replace_mode="swap",
+        extra_profiles=load_profile_file(
+            Path(__file__).resolve().parents[1] / "examples" / "strict_parent.json"
+        ),
+        wan_prompt="do not add new characters",
+        wan_generate=fake_generate,
+        visual_topics=False,
+        filter_topics=("nudity", "religion_christianity"),
+    )
+    analyzer.video_path = video
+    analyzer.output_dir = tmp_path
+    result = analyzer._apply_wan_replacements([
+        {
+            "id": "seg_002",
+            "start_time": 5.0,
+            "end_time": 10.0,
+            "tags": ["nudity"],
+            "topics": ["religion_christianity"],
+            "risk": "mature",
+            "action": "swap",
+        },
+    ])
+    assert prompts
+    assert "Christian" in prompts[0]
+    assert "nudity" in prompts[0].lower()
+    assert prompts[0].endswith("do not add new characters")
+    assert any(seg.get("wan_replaced") for seg in result)
+
+
+class _FakeTopicClassifier:
+    def classify_segments(self, segments):
+        for seg in segments:
+            text = seg.get("transcript", "")
+            seg["topics"] = ["religion_christianity"] if "jesus" in text.lower() else []
+        return segments
+
+
+def test_classify_topics_labels_many_speech_buckets(tmp_path: Path):
+    analyzer = _build_analyzer(
+        tmp_path,
+        classify_topics=True,
+        topic_classifier=_FakeTopicClassifier(),
+    )
+    analyzer._transcript_data = {
+        "segments": [
+            {
+                "words": [
+                    {"word": "hello", "start": 0.0, "end": 1.0},
+                    {"word": "jesus", "start": 5.2, "end": 5.8},
+                    {"word": "saves", "start": 6.0, "end": 6.5},
+                ]
+            }
+        ]
+    }
+    segments = [
+        {"id": f"seg_{i:03d}", "start_time": float(i * 5), "end_time": float(i * 5 + 5), "tags": []}
+        for i in range(45)
+    ]
+    classified = analyzer._classify_topics(segments)
+    assert classified[1]["topics"] == ["religion_christianity"]
+    assert classified[0]["topics"] == []
+    assert all("topics" in seg for seg in classified)
+
+
+def test_apply_visual_topics_uses_injected_scanner(tmp_path: Path):
+    from PIL import Image
+
+    frame = tmp_path / "broad_0000_0000002.000.jpg"
+    Image.new("RGB", (8, 8), color="white").save(frame)
+
+    class Scanner:
+        def topics_for_path(self, path):
+            return ["religion_christianity"]
+
+    analyzer = _build_analyzer(
+        tmp_path,
+        visual_topic_scanner=Scanner(),
+        classify_topics=False,
+    )
+    analyzer._scanned_frames = [{"time": 2.0, "frame_path": str(frame)}]
+    result = analyzer._apply_visual_topics([
+        {"id": "seg_001", "start_time": 0.0, "end_time": 5.0, "topics": []},
+    ])
+    assert result[0]["topics"] == ["religion_christianity"]
+

@@ -139,6 +139,54 @@ def test_profile_resolution_entries_are_embedded(tmp_path: Path, segments, profi
     assert mature["profiles"]["adult"]["action"] == "play"
 
 
+def test_topic_filters_bake_skip_and_persist_topics(tmp_path: Path):
+    profiles = {
+        "strict_parent": {
+            "name": "strict_parent",
+            "filters": {"religion_christianity": "skip", "nudity": "swap"},
+        },
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "tags": [],
+            "topics": ["religion_christianity"],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-sermon",
+        },
+        {
+            "id": "seg_002",
+            "start_time": 5.0,
+            "end_time": 10.0,
+            "tags": [],
+            "topics": [],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-safe",
+        },
+    ]
+    manifest = BvfMuxer.read_bvf(
+        BvfMuxer(movie_id="movie", title="Movie").write_bvf(
+            tmp_path / "movie.bvf",
+            segments=segments,
+            duration_seconds=10.0,
+            profiles=profiles,
+        )
+    )["manifest"]
+    sermon = next(seg for seg in manifest["segments"] if seg["id"] == "seg_001")
+    safe = next(seg for seg in manifest["segments"] if seg["id"] == "seg_002")
+    assert sermon["topics"] == ["religion_christianity"]
+    assert sermon["profiles"]["strict_parent"]["action"] == "skip"
+    assert sermon["profiles"]["adult"]["action"] == "play"
+    assert safe["profiles"]["strict_parent"]["action"] == "play"
+
+
 def test_profile_segment_id_routes_nudity_swaps_to_filler_assets(tmp_path: Path):
     profiles = {
         "child": {"name": "Child", "filters": {"nudity": "swap"}},
@@ -181,6 +229,7 @@ def test_profile_segment_id_routes_nudity_swaps_to_filler_assets(tmp_path: Path)
     )["manifest"]
 
     mature = next(seg for seg in manifest["segments"] if seg["id"] == "seg_001")
+    assert mature["profile_segment_id"] == "filler_001"
     assert mature["profiles"]["child"] == {"action": "swap", "segment_id": "filler_001"}
     assert mature["profiles"]["teen_m"] == {"action": "swap", "segment_id": "filler_001"}
     assert mature["profiles"]["teen_f"] == {"action": "swap", "segment_id": "filler_001"}

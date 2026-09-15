@@ -57,6 +57,69 @@ public class ProfileResolverTests
     }
 
     [Fact]
+    public void GetAvoidedTopics_ReturnsStoredUserTopics()
+    {
+        var userId = TestUserId.ToString();
+        var config = new PluginConfiguration { DefaultProfile = "adult", DefaultAction = "skip" };
+        config.SetUserProfiles(new Dictionary<string, UserBranchProfile>
+        {
+            [userId] = new()
+            {
+                Topics = new List<string> { "religion_christianity", "nudity" },
+            }
+        });
+        CreatePluginContext(config);
+
+        var topics = new ProfileResolver().GetAvoidedTopics(CreateUser());
+
+        Assert.Equal(new[] { "nudity", "religion_christianity" }, topics);
+    }
+
+    [Fact]
+    public void GetHitAction_UsesPerUserValueThenDefaultAction()
+    {
+        var userId = TestUserId.ToString();
+        var config = new PluginConfiguration { DefaultAction = "swap" };
+        config.SetUserProfiles(new Dictionary<string, UserBranchProfile>
+        {
+            [userId] = new()
+            {
+                HitAction = "skip",
+            }
+        });
+        CreatePluginContext(config);
+
+        Assert.Equal("skip", new ProfileResolver().GetHitAction(CreateUser()));
+    }
+
+    [Fact]
+    public void GetHitAction_FallsBackToPluginDefaultThenSkip()
+    {
+        var userId = TestUserId.ToString();
+        var config = new PluginConfiguration { DefaultAction = "swap" };
+        config.SetUserProfiles(new Dictionary<string, UserBranchProfile>
+        {
+            [userId] = new()
+        });
+        CreatePluginContext(config);
+        Assert.Equal("swap", new ProfileResolver().GetHitAction(CreateUser()));
+
+        config.DefaultAction = "nope";
+        CreatePluginContext(config);
+        Assert.Equal("skip", new ProfileResolver().GetHitAction(CreateUser()));
+    }
+
+    [Fact]
+    public void GetAvoidedTopics_EmptyWhenUserHasNoTopics()
+    {
+        CreatePluginContext(BuildConfig(yearsAgo: 12, sex: "male"));
+
+        var topics = new ProfileResolver().GetAvoidedTopics(CreateUser());
+
+        Assert.Empty(topics);
+    }
+
+    [Fact]
     public void ResolveProfile_ProfileOverride_WinsOverAgeAndSex()
     {
         CreatePluginContext(BuildConfig(yearsAgo: 25, sex: "male", profileOverride: "child"));

@@ -12,8 +12,10 @@ Architecture:
 Usage:
   python analyze.py "path/to/movie.mp4" [--model base|tiny|medium] [--threshold 0.75]
 """
+import os
 import sys
 import argparse
+import copy
 import hashlib
 import json
 import logging
@@ -32,6 +34,25 @@ if str(REPO_ROOT) not in sys.path:
 
 from vid_splitter.bvf_muxer import BvfMuxer
 from analyzer.filler import pick_filler_window
+from analyzer.profiles import load_profile_files
+from analyzer.topic_sources import collect_filter_topics, default_jellyfin_plugin_config
+from analyzer.wan_replace import (
+    DEFAULT_WAN_MAX_RUN_S,
+    DEFAULT_WAN_OVERLAP_S,
+    DEFAULT_WAN_PROFILES,
+    DEFAULT_WAN_TAGS,
+    WanRun,
+    chunk_span,
+    coalesce_tagged_runs,
+    merge_run_segments,
+    parse_csv,
+    prompt_for_tags,
+)
+from analyzer.visual_topics import (
+    DEFAULT_VISUAL_SCAN_INTERVAL,
+    DEFAULT_VISUAL_THRESHOLD,
+    attach_visual_topics,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -111,6 +132,26 @@ class MovieAnalyzer:
         demo_filler_video: str | None = None,
         demo_filler_start: float = 0.0,
         demo_filler_duration: float | None = None,
+        replace_mode: str = "skip",
+        wan_replace: bool = False,
+        wan_tags: tuple[str, ...] = DEFAULT_WAN_TAGS,
+        wan_segments: tuple[str, ...] = (),
+        wan_prompt: str | None = None,
+        wan_max_run: float = DEFAULT_WAN_MAX_RUN_S,
+        wan_overlap: float = DEFAULT_WAN_OVERLAP_S,
+        wan_profiles: tuple[str, ...] = DEFAULT_WAN_PROFILES,
+        wan_image: str | Path | None = None,
+        wan_dry_run: bool = False,
+        wan_generate=None,
+        extra_profiles: dict | None = None,
+        classify_topics: bool = True,
+        topic_backend: str | None = None,
+        topic_classifier=None,
+        visual_topics: bool = True,
+        visual_topic_scanner=None,
+        visual_topic_threshold: float = DEFAULT_VISUAL_THRESHOLD,
+        visual_scan_interval: float = DEFAULT_VISUAL_SCAN_INTERVAL,
+        filter_topics: tuple[str, ...] = (),
     ):
         self.video_path = Path(video_path).resolve()
         self.output_dir = Path(output_dir) if output_dir else self.video_path.parent
@@ -129,6 +170,33 @@ class MovieAnalyzer:
         self.demo_filler_start = max(0.0, demo_filler_start)
         self.demo_filler_duration = demo_filler_duration
         self.goldylocks_filler_video = (REPO_ROOT / "videos" / "goldylocks.mp4").resolve()
+        mode = str(replace_mode or "skip").strip().lower()
+        if wan_replace:
+            mode = "swap"
+        if mode not in {"skip", "swap"}:
+            raise ValueError(f"replace_mode must be 'skip' or 'swap', got {replace_mode!r}")
+        self.replace_mode = mode
+        self.wan_replace = mode == "swap"
+        self.wan_tags = tuple(wan_tags)
+        self.wan_segments = tuple(wan_segments)
+        self.wan_prompt = wan_prompt
+        self.wan_max_run = float(wan_max_run)
+        self.wan_overlap = float(wan_overlap)
+        self.wan_profiles = tuple(wan_profiles) or DEFAULT_WAN_PROFILES
+        self.wan_image = Path(wan_image).resolve() if wan_image else None
+        self.wan_dry_run = bool(wan_dry_run)
+        self._wan_generate = wan_generate
+        self.extra_profiles = extra_profiles or {}
+        self.classify_topics_enabled = bool(classify_topics)
+        self.topic_backend = topic_backend
+        self._topic_classifier = topic_classifier
+        self.visual_topics_enabled = bool(visual_topics)
+        self._visual_topic_scanner = visual_topic_scanner
+        self.visual_topic_threshold = float(visual_topic_threshold)
+        self.visual_scan_interval = float(visual_scan_interval)
+        self.filter_topics = tuple(part.strip() for part in filter_topics if str(part).strip())
+        self._scanned_frames: list[dict] = []
+        self._visual_topic_frames: list[dict] = []
 
         if load_models:
             self._load_models()
@@ -140,11 +208,22 @@ class MovieAnalyzer:
         from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
         from transformers import CLIPImageProcessor, AutoModelForImageClassification, AutoImageProcessor
 
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self._device == "cuda":
+            logger.info(
+                "Analyzer device: cuda (%s)",
+                torch.cuda.get_device_name(0),
+            )
+        else:
+            logger.info("Analyzer device: cpu (install a CUDA PyTorch wheel to use the GPU)")
+
         logger.info(f"Loading Whisper model: {self.whisper_model_name}")
-        self.whisper_model = whisper.load_model(self.whisper_model_name)
+        self.whisper_model = whisper.load_model(
+            self.whisper_model_name,
+            device=self._device,
+        )
 
         logger.info("Loading NSFW safety checker...")
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
             "CompVis/stable-diffusion-safety-checker"
         ).to(self._device)
@@ -192,14 +271,21 @@ class MovieAnalyzer:
         # 5. Merge overlapping detections into segments
         segments = self._merge_segments(detections, duration)
 
-        # 5b. Classify segments for topics using LLM
-        logger.info("Classifying segments for topics with LLM...")
-        segments = self._classify_topics(segments)
+        # 5b. Classify transcript segments for topics (embeddings by default)
+        if self.classify_topics_enabled:
+            logger.info("Classifying segments for topics...")
+            segments = self._classify_topics(segments)
+        else:
+            for seg in segments:
+                seg.setdefault("topics", [])
+
+        segments = self._apply_visual_topics(segments)
+        segments = self._apply_replace_mode(segments)
 
         # Keep analyzer output on the requested frame_interval cadence. Segment
         # media is re-encoded below, so cuts no longer need to be snapped to
         # sparse source keyframes.
-        segments = self._attach_goldylocks_fillers(segments)
+        segments = self._apply_wan_replacements(segments)
 
         # 6. Generate manifest
         manifest = self._build_manifest(segments, duration)
@@ -318,6 +404,7 @@ class MovieAnalyzer:
         if self.debug_contact_sheet:
             self._export_debug_contact_sheet(broad_results + dense_results)
 
+        self._scanned_frames = broad_results + dense_results
         logger.info(
             "Dense scan sampled %d frame(s) across %d candidate window(s) and confirmed %d mature detection(s).",
             len(dense_results),
@@ -664,6 +751,7 @@ class MovieAnalyzer:
                 "-ss", str(start_time),
                 "-i", str(self.video_path),
                 "-frames:v", "1",
+                "-update", "1",
                 "-f", "image2",
                 str(frame_path),
             ],
@@ -789,7 +877,6 @@ class MovieAnalyzer:
         rescue_triggered_by: list[str] = []
         if (
             not classification["threshold_passed"]
-            and not classification["triggered_by"]
             and mean_luma <= DARK_FRAME_LUMA_THRESHOLD
         ):
             rescue_applied = True
@@ -1077,20 +1164,30 @@ class MovieAnalyzer:
     # ─── Step 3b: LLM Topic Classification ──────────────────────────────
 
     def _classify_topics(self, segments: list[dict]) -> list[dict]:
-        """Classify segments for topics using LLM.
+        """Classify segments for transcript topics.
 
-        Adds 'topics' key to each segment with LLM-classified topics.
+        Adds a 'topics' key to each segment. Appearance topics still come from CLIP.
         """
         for seg in segments:
             seg.setdefault("topics", [])
+        if not self.classify_topics_enabled:
+            return segments
 
         try:
-            from analyzer.topic_classifier import LLMTopicClassifier
-            clf = LLMTopicClassifier()
+            clf = self._topic_classifier
+            if clf is None:
+                from analyzer.topic_classifier import (
+                    make_topic_classifier,
+                    transcript_topic_taxonomy,
+                )
 
-            # Build transcript segments for classification. With 5s BVF buckets,
-            # most segments are silent/empty; avoid spending one LLM request per
-            # empty bucket because that makes production runs crawl.
+                clf = make_topic_classifier(
+                    topics=transcript_topic_taxonomy(self.filter_topics),
+                    backend=self.topic_backend,
+                )
+                self._topic_classifier = clf
+
+            # Build transcript segments for classification.
             transcript_segs = []
             segment_indices = []
             for idx, seg in enumerate(segments):
@@ -1109,22 +1206,13 @@ class MovieAnalyzer:
             if not transcript_segs:
                 return segments
 
-            if len(transcript_segs) > 40:
-                logger.info(
-                    "Skipping LLM topic classification for %d short segments; "
-                    "5s bucketed analysis would otherwise issue one request per segment.",
-                    len(transcript_segs),
-                )
-                return segments
-
             classified = clf.classify_segments(transcript_segs)
 
-            # Add topics back only to the non-empty transcript segments.
             for idx, cls in zip(segment_indices, classified):
                 segments[idx]["topics"] = cls.get("topics", [])
 
         except Exception as e:
-            logger.warning(f"LLM topic classification failed: {e}")
+            logger.warning(f"Transcript topic classification failed: {e}")
 
         return segments
 
@@ -1191,7 +1279,7 @@ class MovieAnalyzer:
                 "end_time": end_time,
                 "tags": tags,
                 "risk": risk,
-                "action": "swap" if risk == "mature" else "play",
+                "action": "play",
             })
 
         return [seg for seg in segments if seg["end_time"] > seg["start_time"]]
@@ -1279,6 +1367,8 @@ class MovieAnalyzer:
                 manifest_seg["profiles"] = seg["profiles"]
             if seg.get("profile_segment_id"):
                 manifest_seg["profile_segment_id"] = seg["profile_segment_id"]
+            if seg.get("wan_replaced"):
+                manifest_seg["wan_replaced"] = True
             if seg.get("is_filler"):
                 manifest_seg["is_filler"] = True
             if seg.get("source_path"):
@@ -1301,9 +1391,351 @@ class MovieAnalyzer:
             "movie_path": str(self.video_path),
             "duration_seconds": round(duration, 2),
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
-            "profiles": DEFAULT_PROFILES,
+            "profiles": self._profiles_for_manifest(segments),
             "segments": manifest_segments,
         }
+
+    def _all_profiles(self) -> dict:
+        profiles = copy.deepcopy(DEFAULT_PROFILES)
+        for key, value in (self.extra_profiles or {}).items():
+            profiles[str(key)] = copy.deepcopy(value)
+        return profiles
+
+    def _filter_keys(self) -> set[str]:
+        keys = set(self.filter_topics)
+        if self.wan_tags:
+            keys &= set(self.wan_tags)
+        return keys
+
+    def _segment_hits_filters(self, seg: dict) -> set[str]:
+        return self._filter_keys().intersection(
+            set(seg.get("tags") or []) | set(seg.get("topics") or [])
+        )
+
+    def _apply_replace_mode(self, segments: list[dict]) -> list[dict]:
+        updated = []
+        for seg in segments:
+            row = dict(seg)
+            if row.get("is_filler"):
+                updated.append(row)
+                continue
+            row["action"] = self.replace_mode if self._segment_hits_filters(row) else "play"
+            updated.append(row)
+        return updated
+
+    def _ensure_visual_topic_frames(self, duration: float) -> list[dict]:
+        """Sample frames for CLIP appearance tags (denser than the NSFW broad pass)."""
+        if self._visual_topic_frames:
+            return self._visual_topic_frames
+
+        interval = max(0.5, float(self.visual_scan_interval))
+        frames_dir = self.output_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        scanned = list(self._scanned_frames or [])
+        collected: list[dict] = []
+        seen_paths: set[str] = set()
+
+        def reuse_near(sample_time: float) -> dict | None:
+            for row in scanned:
+                path = row.get("frame_path")
+                if not path or not Path(path).is_file():
+                    continue
+                if abs(float(row.get("time", -999)) - sample_time) <= interval * 0.35:
+                    return row
+            return None
+
+        timestamps = self._build_scan_timestamps(
+            0.0, duration, interval, include_end=True
+        )
+        for index, timestamp in enumerate(timestamps):
+            sample_time = self._clamp_sample_time(timestamp, duration)
+            existing = reuse_near(sample_time)
+            if existing is not None:
+                path = str(existing["frame_path"])
+                if path not in seen_paths:
+                    collected.append(dict(existing))
+                    seen_paths.add(path)
+                continue
+            frame_path = frames_dir / f"visual_{index:04d}_{sample_time:010.3f}.jpg"
+            try:
+                self._extract_frame(sample_time, frame_path)
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+                logger.warning(
+                    "Failed to extract visual frame at %.2fs: %s", sample_time, stderr
+                )
+                continue
+            if not frame_path.is_file():
+                continue
+            path = str(frame_path)
+            if path in seen_paths:
+                continue
+            collected.append(
+                {
+                    "time": sample_time,
+                    "frame_path": path,
+                    "phase": "visual",
+                }
+            )
+            seen_paths.add(path)
+
+        logger.info(
+            "Visual topic scan: %d frame(s) every %.1fs (%d reused from NSFW pass)",
+            len(collected),
+            interval,
+            sum(1 for row in collected if row.get("phase") != "visual"),
+        )
+        self._visual_topic_frames = collected
+        return collected
+
+    def _apply_visual_topics(self, segments: list[dict]) -> list[dict]:
+        if not self.visual_topics_enabled:
+            return segments
+        duration = float(segments[-1].get("end_time", 0.0)) if segments else 0.0
+        frames = self._ensure_visual_topic_frames(duration)
+        if not frames:
+            return segments
+        scanner = self._visual_topic_scanner
+        if scanner is None:
+            try:
+                from analyzer.topic_classifier import taxonomy_with_extras
+                from analyzer.visual_topics import VISUAL_PROMPTS, ClipTopicScanner
+
+                scanner = ClipTopicScanner(
+                    device=getattr(self, "_device", "cpu"),
+                    threshold=self.visual_topic_threshold,
+                    taxonomy=taxonomy_with_extras(self.filter_topics, dict(VISUAL_PROMPTS)),
+                )
+                logger.info(
+                    "Visual topics: CLIP + Faster R-CNN person crops (see output/vision_bakeoff/)"
+                )
+                self._visual_topic_scanner = scanner
+            except Exception as exc:
+                logger.warning("Visual topic scanner unavailable: %s", exc)
+                return segments
+        return attach_visual_topics(segments, frames, scanner)
+
+    def _profiles_for_manifest(self, segments: list[dict]) -> dict:
+        profiles = self._all_profiles()
+        mode = self.replace_mode
+        if mode == "swap" and (
+            self.wan_dry_run or not any(seg.get("wan_replaced") for seg in segments)
+        ):
+            mode = "skip"
+        for name, profile in profiles.items():
+            existing = profile.get("filters") or {}
+            if name == "adult" or not existing:
+                profile["filters"] = {}
+                continue
+            keys = self.filter_topics or tuple(existing.keys())
+            profile["filters"] = {key: mode for key in keys}
+        return profiles
+
+    def _next_filler_id(self, segments: list[dict]) -> str:
+        used = 0
+        for seg in segments:
+            seg_id = str(seg.get("id") or "")
+            if seg_id.startswith("filler_"):
+                used += 1
+        return f"filler_{used + 1:03d}"
+
+    def _apply_wan_replacements(self, segments: list[dict]) -> list[dict]:
+        if self.replace_mode != "swap":
+            return segments
+        wanted = self._filter_keys()
+        runs = coalesce_tagged_runs(
+            segments,
+            tags=wanted,
+            segment_ids=self.wan_segments or None,
+        )
+        jobs = [
+            {
+                "start": run.start,
+                "end": run.end,
+                "duration": round(run.duration, 3),
+                "segment_ids": list(run.segment_ids),
+                "tags": list(run.tags),
+                "prompt": prompt_for_tags(run.tags, self.wan_prompt),
+                "chunks": chunk_span(run.start, run.end, self.wan_max_run, self.wan_overlap),
+            }
+            for run in runs
+        ]
+        plan_path = self.output_dir / f"{self.video_path.stem}_wan_jobs.json"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(json.dumps({"dry_run": self.wan_dry_run, "jobs": jobs}, indent=2))
+        logger.info("Wrote %d Wan replacement job(s) to %s", len(jobs), plan_path)
+        if self.wan_dry_run or not runs:
+            return segments
+        merged = merge_run_segments(segments, runs)
+        return self._attach_wan_fillers(merged, runs)
+
+    def _attach_wan_fillers(self, segments: list[dict], runs: list[WanRun]) -> list[dict]:
+        updated = [dict(seg) for seg in segments]
+        by_id = {seg["id"]: seg for seg in updated if not seg.get("is_filler")}
+        fillers: list[dict] = []
+        work = self.output_dir / f"{self.video_path.stem}_wan_clips"
+        work.mkdir(parents=True, exist_ok=True)
+
+        for index, run in enumerate(runs, start=1):
+            survivor = by_id.get(run.segment_ids[0])
+            if survivor is None:
+                logger.warning("Wan run %s lost its narrative segment; skipping.", run.segment_ids)
+                continue
+            chunks = chunk_span(run.start, run.end, self.wan_max_run, self.wan_overlap)
+            chunk_paths: list[Path] = []
+            logger.info(
+                "Wan run %s/%s: %.1fs-%.1fs (%s) in %s chunk(s)",
+                index,
+                len(runs),
+                run.start,
+                run.end,
+                ", ".join(run.tags),
+                len(chunks),
+            )
+            for chunk_i, (chunk_start, chunk_end) in enumerate(chunks):
+                chunk_path = work / f"run_{index:03d}_chunk_{chunk_i:02d}.mp4"
+                logger.info(
+                    "Wan chunk %s/%s of run %s: %.1fs-%.1fs -> %s",
+                    chunk_i + 1,
+                    len(chunks),
+                    index,
+                    chunk_start,
+                    chunk_end,
+                    chunk_path.name,
+                )
+                if chunk_path.is_file() and chunk_path.stat().st_size > 0:
+                    logger.info("Reusing existing Wan chunk %s", chunk_path)
+                else:
+                    self._call_wan_generate(
+                        prompt=prompt_for_tags(run.tags, self.wan_prompt),
+                        output=chunk_path,
+                        start=chunk_start,
+                        duration=max(0.1, chunk_end - chunk_start),
+                        seed=self._segment_seed(survivor) + chunk_i,
+                    )
+                chunk_paths.append(chunk_path)
+            if not chunk_paths:
+                continue
+            skip_starts = [0.0]
+            for _ in chunk_paths[1:]:
+                skip_starts.append(self.wan_overlap if self.wan_overlap > 0 else 0.0)
+            generated = work / f"run_{index:03d}.mp4"
+            self._concat_wan_chunks(chunk_paths, skip_starts, generated)
+            try:
+                filler_duration = self._get_duration_for_path(generated)
+            except Exception as exc:
+                raise RuntimeError(f"Wan clip {generated} could not be probed: {exc}") from exc
+            filler_id = self._next_filler_id(updated + fillers)
+            survivor["profile_segment_id"] = filler_id
+            survivor["action"] = "swap"
+            survivor["wan_replaced"] = True
+            fillers.append({
+                "id": filler_id,
+                "start_time": 0.0,
+                "end_time": round(filler_duration, 3),
+                "tags": [],
+                "risk": "safe",
+                "action": "play",
+                "is_filler": True,
+                "source_path": str(generated),
+                "source_start_time": 0.0,
+                "source_end_time": round(filler_duration, 3),
+            })
+            logger.info(
+                "Wan replaced %s (%.1fs-%.1fs) -> %s",
+                ",".join(run.segment_ids),
+                run.start,
+                run.end,
+                filler_id,
+            )
+        return updated + fillers
+
+    def _call_wan_generate(
+        self,
+        *,
+        prompt: str,
+        output: Path,
+        start: float,
+        duration: float,
+        seed: int,
+    ) -> Path:
+        kwargs = {
+            "prompt": prompt,
+            "output": output,
+            "video": self.video_path,
+            "image": self.wan_image,
+            "start": start,
+            "duration": duration,
+            "seed": seed,
+            "keep_audio": True,
+        }
+        if self._wan_generate is not None:
+            return Path(self._wan_generate(**kwargs))
+        from tools.wan_v2v import generate_animate
+
+        return generate_animate(**kwargs)
+
+    def _concat_wan_chunks(
+        self,
+        paths: list[Path],
+        skip_starts: list[float],
+        dest: Path,
+    ) -> Path:
+        if len(paths) == 1 and skip_starts[0] <= 1e-9:
+            if paths[0].resolve() != dest.resolve():
+                dest.write_bytes(paths[0].read_bytes())
+            return dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="wan_concat_") as tmp:
+            tmp_dir = Path(tmp)
+            trimmed: list[Path] = []
+            for i, src in enumerate(paths):
+                skip = skip_starts[i] if i < len(skip_starts) else 0.0
+                part = tmp_dir / f"part_{i:02d}.mp4"
+                cmd = ["ffmpeg", "-y"]
+                if skip > 1e-9:
+                    cmd.extend(["-ss", f"{skip:.3f}"])
+                cmd.extend(["-i", str(src), "-c", "copy", str(part)])
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                except subprocess.CalledProcessError:
+                    encode = ["ffmpeg", "-y"]
+                    if skip > 1e-9:
+                        encode.extend(["-ss", f"{skip:.3f}"])
+                    encode.extend(
+                        [
+                            "-i",
+                            str(src),
+                            "-c:v",
+                            "libx264",
+                            "-c:a",
+                            "aac",
+                            str(part),
+                        ]
+                    )
+                    subprocess.run(encode, check=True, capture_output=True, text=True)
+                trimmed.append(part)
+            listing = tmp_dir / "concat.txt"
+            listing.write_text("".join(f"file '{p}'\n" for p in trimmed))
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(listing),
+                    "-c",
+                    "copy",
+                    str(dest),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        return dest
 
     def _attach_goldylocks_fillers(self, segments: list[dict]) -> list[dict]:
         nudity_segments = [
@@ -1336,6 +1768,8 @@ class MovieAnalyzer:
         for seg in updated_segments:
             if seg.get("is_filler") or "nudity" not in set(seg.get("tags", [])):
                 continue
+            if seg.get("profile_segment_id"):
+                continue
 
             segment_duration = max(0.01, float(seg["end_time"]) - float(seg["start_time"]))
             try:
@@ -1352,7 +1786,7 @@ class MovieAnalyzer:
                 )
                 continue
 
-            filler_id = f"filler_{len(filler_segments) + 1:03d}"
+            filler_id = self._next_filler_id(updated_segments + filler_segments)
             seg["profile_segment_id"] = filler_id
             filler_segments.append({
                 "id": filler_id,
@@ -1608,6 +2042,10 @@ class MovieAnalyzer:
                 "-b:a", "128k",
                 "-avoid_negative_ts", "make_zero",
                 "-reset_timestamps", "1",
+                "-muxdelay", "0",
+                "-muxpreload", "0",
+                "-async", "1",
+                "-af", "aresample=async=1:first_pts=0",
                 "-movflags", "frag_keyframe+empty_moov+default_base_moof",
                 "-f", "mp4",
                 str(output_path),
@@ -1725,7 +2163,136 @@ def main():
         default=None,
         help="Demo-branch only: replacement clip duration in seconds (defaults to mature segment length)",
     )
+    parser.add_argument(
+        "--replace-mode",
+        choices=("skip", "swap"),
+        default="skip",
+        help="Top-level action for every profile filter key: skip or swap (default: skip)",
+    )
+    parser.add_argument(
+        "--wan-replace",
+        action="store_true",
+        help="Alias for --replace-mode swap. Blocks until Wan 2.2 Animate finishes each replacement",
+    )
+    parser.add_argument(
+        "--topics",
+        default="",
+        help="Comma-separated avoided topic names (unioned with --topics-file / Jellyfin)",
+    )
+    parser.add_argument(
+        "--topics-file",
+        default=None,
+        help="Topic names, one per line (optional note after a tab). See examples/avoided_topics.tsv",
+    )
+    parser.add_argument(
+        "--jellyfin-url",
+        default=None,
+        help="Jellyfin base URL; pulls avoided topics from Smart Branching plugin config",
+    )
+    parser.add_argument(
+        "--jellyfin-api-key",
+        default=None,
+        help="Jellyfin API key (or JELLYFIN_API_KEY). Used with --jellyfin-url",
+    )
+    parser.add_argument(
+        "--jellyfin-config",
+        default=None,
+        help=(
+            "Smart Branching plugin XML/JSON on disk (CustomTopics + user Topics). "
+            "Defaults to JELLYFIN_PLUGIN_CONFIG or ~/servers/jellyfin/.../Jellyfin.Plugin.SmartBranching.xml"
+        ),
+    )
+    parser.add_argument(
+        "--wan-tags",
+        default="",
+        help="Optional comma-separated restriction of --topics for Wan swap jobs",
+    )
+    parser.add_argument(
+        "--wan-segments",
+        default="",
+        help="Optional comma-separated narrative segment IDs to replace (default: all matching profile keys)",
+    )
+    parser.add_argument(
+        "--prompt",
+        "--wan-prompt",
+        dest="wan_prompt",
+        default=None,
+        help="Extra instructions appended to the auto-built Wan removal prompt",
+    )
+    parser.add_argument(
+        "--no-visual-topics",
+        action="store_true",
+        help="Skip CLIP visual topic scan with person crops (transcript topics still run unless --no-topics)",
+    )
+    parser.add_argument(
+        "--visual-scan-interval",
+        type=float,
+        default=DEFAULT_VISUAL_SCAN_INTERVAL,
+        help="Seconds between CLIP appearance/topic frames (default: 1.0; NSFW broad pass stays at --scan-interval)",
+    )
+    parser.add_argument(
+        "--wan-max-run",
+        type=float,
+        default=DEFAULT_WAN_MAX_RUN_S,
+        help="Max seconds per Wan job before a run is split (default: 12)",
+    )
+    parser.add_argument(
+        "--wan-overlap",
+        type=float,
+        default=DEFAULT_WAN_OVERLAP_S,
+        help="Overlap seconds between split Wan chunks (default: 0.5)",
+    )
+    parser.add_argument(
+        "--wan-profiles",
+        default=",".join(DEFAULT_WAN_PROFILES),
+        help="Deprecated: all non-empty profiles use --replace-mode. Kept for old scripts.",
+    )
+    parser.add_argument(
+        "--wan-image",
+        default=None,
+        help="Optional appearance reference image for Animate (default: first frame of each clip)",
+    )
+    parser.add_argument(
+        "--wan-dry-run",
+        action="store_true",
+        help="Plan Wan jobs into *_wan_jobs.json without calling ComfyUI or changing the BVF",
+    )
+    parser.add_argument(
+        "--profile-json",
+        action="append",
+        default=[],
+        help="Extra BVF profile JSON (repeatable). Example: examples/strict_parent.json",
+    )
+    parser.add_argument(
+        "--topic-backend",
+        choices=("embed", "llm"),
+        default=None,
+        help=(
+            "Transcript topic classifier: embed (MiniLM on :9009, default) or "
+            "llm (OpenAI-compatible chat at TOPIC_API_URL). Visual CLIP topics still run either way."
+        ),
+    )
+    parser.add_argument(
+        "--no-topics",
+        action="store_true",
+        help="Skip transcript topic classification (CLIP visual topics still run unless --no-visual-topics)",
+    )
     args = parser.parse_args()
+
+    jellyfin_config = args.jellyfin_config or default_jellyfin_plugin_config()
+    if jellyfin_config:
+        logger.info("Reading Jellyfin topics from %s", jellyfin_config)
+    filter_topics = collect_filter_topics(
+        topics_file=args.topics_file,
+        jellyfin_url=args.jellyfin_url,
+        jellyfin_api_key=args.jellyfin_api_key,
+        jellyfin_config=jellyfin_config,
+        extra=parse_csv(args.topics),
+    )
+    if filter_topics:
+        logger.info("Avoided topics for this run: %s", ", ".join(filter_topics))
+    else:
+        logger.info("No avoided-topic list supplied; labeling only.")
 
     analyzer = MovieAnalyzer(
         video_path=args.video,
@@ -1744,6 +2311,22 @@ def main():
         demo_filler_video=args.demo_filler_video,
         demo_filler_start=args.demo_filler_start,
         demo_filler_duration=args.demo_filler_duration,
+        replace_mode=args.replace_mode,
+        wan_replace=args.wan_replace,
+        wan_tags=parse_csv(args.wan_tags),
+        wan_segments=parse_csv(args.wan_segments),
+        wan_prompt=args.wan_prompt,
+        wan_max_run=args.wan_max_run,
+        wan_overlap=args.wan_overlap,
+        wan_profiles=parse_csv(args.wan_profiles) or DEFAULT_WAN_PROFILES,
+        wan_image=args.wan_image,
+        wan_dry_run=args.wan_dry_run,
+        extra_profiles=load_profile_files(args.profile_json) if args.profile_json else {},
+        classify_topics=not args.no_topics,
+        topic_backend=args.topic_backend,
+        visual_topics=not args.no_visual_topics,
+        visual_scan_interval=args.visual_scan_interval,
+        filter_topics=filter_topics,
     )
 
     try:

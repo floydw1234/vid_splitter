@@ -38,6 +38,7 @@ public class SegmentServer : IMediaSourceProvider
     private readonly ProfileResolver _profileResolver;
     private readonly BvfManifestCache _bvfManifestCache = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, BvfHlsTimeline> _hlsTimelines = new();
+    private readonly BvfHlsFragmentCache _hlsFragmentCache = new();
     private readonly IHttpContextAccessor? _httpContextAccessor;
 
     public SegmentServer(
@@ -82,7 +83,8 @@ public class SegmentServer : IMediaSourceProvider
     {
         _bvfManifestCache.Clear();
         _hlsTimelines.Clear();
-        _logger.LogInformation("BVF manifest and HLS timeline caches cleared");
+        _hlsFragmentCache.Clear();
+        _logger.LogInformation("BVF manifest, HLS timeline, and fragment caches cleared");
     }
 
     public string? FindBvfFile(string itemPath)
@@ -105,8 +107,13 @@ public class SegmentServer : IMediaSourceProvider
     public List<ResolvedSegment> ResolveAllSegments(string bvfPath, UserDto user)
     {
         var manifest = GetBvfManifest(bvfPath);
+        var avoided = TopicPlayback.NormalizeTopics(_profileResolver.GetAvoidedTopics(user));
+        var hitAction = _profileResolver.GetHitAction(user);
+        if (avoided.Count > 0)
+            return ResolveAllSegmentsForTopics(bvfPath, avoided, hitAction);
+
         var profileKey = _profileResolver.ResolveProfile(user, manifest);
-        return ResolveAllSegmentsForProfile(bvfPath, profileKey);
+        return ResolveAllSegmentsForProfile(bvfPath, profileKey, hitAction);
     }
 
     public bool HasBvfFile(string moviePath) => FindBvfFile(moviePath) != null;
@@ -136,7 +143,7 @@ public class SegmentServer : IMediaSourceProvider
 
             if (TryResolveRequestProfile(manifest, out var resolvedProfile))
             {
-                var resolvedSegments = ResolveAllSegmentsForProfile(bvfPath, resolvedProfile);
+                var resolvedSegments = ResolveSegmentsForRequest(bvfPath, resolvedProfile);
                 var streamingSource = TryCreateHlsMediaSource(
                     bvfPath,
                     resolvedProfile,
@@ -277,7 +284,23 @@ public class SegmentServer : IMediaSourceProvider
         => DecodeMediaSourceToken(token);
 
     internal List<ResolvedSegment> ResolveSegmentsForProfile(string bvfPath, string profileKey)
-        => ResolveAllSegmentsForProfile(bvfPath, profileKey);
+        => ResolveSegmentsForRequest(bvfPath, profileKey);
+
+    private List<ResolvedSegment> ResolveSegmentsForRequest(string bvfPath, string profileKey)
+    {
+        var user = TryGetAuthenticatedUser();
+        if (user != null)
+        {
+            var avoided = TopicPlayback.NormalizeTopics(_profileResolver.GetAvoidedTopics(user));
+            var hitAction = _profileResolver.GetHitAction(user);
+            if (avoided.Count > 0)
+                return ResolveAllSegmentsForTopics(bvfPath, avoided, hitAction);
+
+            return ResolveAllSegmentsForProfile(bvfPath, profileKey, hitAction);
+        }
+
+        return ResolveAllSegmentsForProfile(bvfPath, profileKey);
+    }
 
     /// <summary>
     /// Returns the cached HLS timeline (exact per-segment durations and cumulative
@@ -289,8 +312,65 @@ public class SegmentServer : IMediaSourceProvider
         IReadOnlyList<ResolvedSegment> segments)
     {
         var fileInfo = new FileInfo(bvfPath);
-        var cacheKey = $"{bvfPath}|{profileKey}|{fileInfo.LastWriteTimeUtc.Ticks}|{fileInfo.Length}";
+        var cacheKey = BuildTimelineCacheKey(bvfPath, fileInfo, segments);
         return _hlsTimelines.GetOrAdd(cacheKey, _ => BuildHlsTimeline(bvfPath, segments));
+    }
+
+    internal string GetTimelineCacheKey(string bvfPath, IReadOnlyList<ResolvedSegment> segments)
+    {
+        var fileInfo = new FileInfo(bvfPath);
+        return BuildTimelineCacheKey(bvfPath, fileInfo, segments);
+    }
+
+    /// <summary>
+    /// Returns an assembled HLS media fragment, using the LRU cache and prefetching
+    /// ~5 seconds ahead on a background thread (CD-style read-ahead).
+    /// </summary>
+    internal byte[] GetHlsMediaFragment(
+        string bvfPath,
+        IReadOnlyList<ResolvedSegment> segments,
+        BvfHlsTimeline timeline,
+        int partIndex)
+    {
+        var streamKey = GetTimelineCacheKey(bvfPath, segments);
+        var fragmentKey = BvfHlsFragmentCache.FragmentKey(streamKey, partIndex);
+        var bytes = _hlsFragmentCache.GetOrAdd(
+            fragmentKey,
+            () => BvfHlsMediaAssembler.Assemble(bvfPath, segments, timeline, partIndex));
+
+        _hlsFragmentCache.PrefetchAhead(
+            streamKey,
+            timeline,
+            partIndex + 1,
+            i => BvfHlsMediaAssembler.Assemble(bvfPath, segments, timeline, i));
+
+        return bytes;
+    }
+
+    internal void WarmHlsFragmentCache(
+        string bvfPath,
+        IReadOnlyList<ResolvedSegment> segments,
+        BvfHlsTimeline timeline)
+    {
+        var streamKey = GetTimelineCacheKey(bvfPath, segments);
+        _hlsFragmentCache.PrefetchAhead(
+            streamKey,
+            timeline,
+            0,
+            i => BvfHlsMediaAssembler.Assemble(bvfPath, segments, timeline, i));
+    }
+
+    private static string BuildTimelineCacheKey(
+        string bvfPath,
+        FileInfo fileInfo,
+        IReadOnlyList<ResolvedSegment> segments)
+    {
+        var builder = new StringBuilder(segments.Count * 24);
+        foreach (var segment in segments)
+            builder.Append(segment.SegmentId).Append('|').Append(segment.DataOffset).Append(';');
+
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+        return $"{bvfPath}|{fileInfo.LastWriteTimeUtc.Ticks}|{fileInfo.Length}|{digest[..16]}";
     }
 
     private static BvfHlsTimeline BuildHlsTimeline(string bvfPath, IReadOnlyList<ResolvedSegment> segments)
@@ -319,25 +399,27 @@ public class SegmentServer : IMediaSourceProvider
                 continue;
 
             using var payloadStream = new MemoryStream(payload, writable: false);
-            var segmentOffset = cumulativeTicks;
             for (var fragmentIndex = 0; fragmentIndex < fragments.Count; fragmentIndex++)
             {
                 var (start, length) = fragments[fragmentIndex];
+                var fragmentStartTicks = cumulativeTicks;
+                var fallbackSeconds = segments[i].DurationMs / 1000.0 / Math.Max(fragments.Count, 1);
                 var ticks = Fmp4TimestampRewriter.SumTrackDurationTicks(payloadStream, start, length, video.TrackId);
+                if (ticks == 0)
+                    ticks = (ulong)Math.Round(fallbackSeconds * video.Timescale);
                 var durationSeconds = ticks > 0
                     ? ticks / (double)video.Timescale
-                    : segments[i].DurationMs / 1000.0 / Math.Max(fragments.Count, 1);
+                    : fallbackSeconds;
 
                 parts.Add(new BvfHlsPart
                 {
                     ResolvedIndex = i,
                     PayloadStart = start,
                     PayloadLength = length,
-                    // Fragments inside one BVF asset already carry relative tfdt
-                    // values; only offset by prior assets so we don't double-count.
-                    TimestampOffsetTicks = segmentOffset,
+                    TimestampOffsetTicks = fragmentStartTicks,
                     DurationSeconds = durationSeconds,
-                    ClampAudio = fragmentIndex == fragments.Count - 1,
+                    ClampAudio = true,
+                    SegmentStart = fragmentIndex == 0,
                 });
                 cumulativeTicks += ticks;
             }
@@ -356,7 +438,10 @@ public class SegmentServer : IMediaSourceProvider
         };
     }
 
-    private List<ResolvedSegment> ResolveAllSegmentsForProfile(string bvfPath, string profileKey)
+    private List<ResolvedSegment> ResolveAllSegmentsForProfile(
+        string bvfPath,
+        string profileKey,
+        string? preferredAction = null)
     {
         var manifest = GetBvfManifest(bvfPath);
         var index = BVFReader.GetSegments(bvfPath)
@@ -376,6 +461,16 @@ public class SegmentServer : IMediaSourceProvider
                 targetSegmentId = string.IsNullOrEmpty(profileAction.SegmentId)
                     ? segment.Id
                     : profileAction.SegmentId;
+            }
+
+            if (!string.IsNullOrEmpty(preferredAction))
+            {
+                action = TopicPlayback.ApplyPreferredAction(
+                    action,
+                    preferredAction,
+                    TopicPlayback.HasSwapTarget(segment));
+                if (!string.Equals(action, "swap", StringComparison.OrdinalIgnoreCase))
+                    targetSegmentId = segment.Id;
             }
 
             if (!RuntimeSupportedActions.Contains(action))
@@ -417,6 +512,76 @@ public class SegmentServer : IMediaSourceProvider
             profileKey,
             resolved.Count(s => s.IsSwapped),
             manifest.Segments.Count(s => !s.IsFiller) - resolved.Count);
+
+        return resolved;
+    }
+
+    private List<ResolvedSegment> ResolveAllSegmentsForTopics(
+        string bvfPath,
+        IReadOnlySet<string> avoidedTopics,
+        string preferredAction)
+    {
+        var manifest = GetBvfManifest(bvfPath);
+        var index = BVFReader.GetSegments(bvfPath)
+            .ToDictionary(s => s.segmentId, StringComparer.Ordinal);
+        var resolved = new List<ResolvedSegment>();
+        var skipped = 0;
+
+        foreach (var segment in manifest.Segments)
+        {
+            if (segment.IsFiller)
+                continue;
+
+            var action = TopicPlayback.ResolveAction(segment, avoidedTopics, preferredAction);
+            if (!RuntimeSupportedActions.Contains(action))
+                throw new InvalidOperationException(
+                    $"Unsupported BVF action for runtime playback: '{action}'. " +
+                    "Supported actions: play, skip, swap.");
+
+            if (string.Equals(action, "skip", StringComparison.OrdinalIgnoreCase))
+            {
+                skipped++;
+                continue;
+            }
+
+            var targetSegmentId = TopicPlayback.ResolveTargetId(segment, action);
+            if (!index.TryGetValue(targetSegmentId, out var target))
+            {
+                if (string.Equals(action, "swap", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        $"BVF segment '{segment.Id}' resolves to missing target '{targetSegmentId}'.");
+                }
+
+                _logger.LogWarning(
+                    "BVF segment {SegmentId} resolves to missing target {TargetSegmentId}",
+                    segment.Id,
+                    targetSegmentId);
+                continue;
+            }
+
+            resolved.Add(new ResolvedSegment
+            {
+                Source = segment,
+                ResolvedPath = $"bvf://{bvfPath}?seg_id={targetSegmentId}&offset={target.dataOffset}&length={target.dataLength}",
+                IsSwapped = string.Equals(action, "swap", StringComparison.OrdinalIgnoreCase),
+                Action = action,
+                SwapType = string.Equals(action, "swap", StringComparison.OrdinalIgnoreCase) ? "filler" : "original",
+                SegmentId = targetSegmentId,
+                DataOffset = target.dataOffset,
+                DataLength = target.dataLength,
+                DurationMs = target.durationMs,
+                AudioHash = target.audioHash,
+            });
+        }
+
+        _logger.LogInformation(
+            "Resolved {Total} segments for {Movie} (topics: {Topics}, swapped: {Swapped}, skipped: {Skipped})",
+            resolved.Count,
+            manifest.MovieId,
+            string.Join(",", avoidedTopics),
+            resolved.Count(s => s.IsSwapped),
+            skipped);
 
         return resolved;
     }
@@ -510,10 +675,6 @@ public class SegmentServer : IMediaSourceProvider
 
     private static string GetDefaultProfile(BranchManifest manifest)
     {
-        var configured = Plugin.Instance?.Configuration?.DefaultProfile;
-        if (!string.IsNullOrEmpty(configured) && manifest.Profiles.ContainsKey(configured))
-            return configured;
-
         foreach (var candidate in new[] { "adult", "teen_m", "teen_f", "teen", "child" })
         {
             if (manifest.Profiles.ContainsKey(candidate))

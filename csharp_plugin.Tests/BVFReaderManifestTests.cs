@@ -113,6 +113,56 @@ public class BVFReaderManifestTests
     }
 
     [Fact]
+    public void GetSegments_SkipsBakedChristianityTopic()
+    {
+        var manifestJson = """
+            {
+              "movie_id": "movie-123",
+              "title": "Example",
+              "duration_ms": 120000,
+              "profiles": {
+                "strict_parent": { "name": "strict_parent", "filters": { "religion_christianity": "skip" } },
+                "adult": { "name": "Adult", "filters": {} }
+              },
+              "segments": [
+                {
+                  "id": "seg-sermon",
+                  "start_ms": 0,
+                  "end_ms": 4000,
+                  "tags": [],
+                  "topics": ["religion_christianity"],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": {
+                    "strict_parent": { "action": "skip", "segment_id": "seg-sermon" },
+                    "adult": { "action": "play", "segment_id": "seg-sermon" }
+                  }
+                },
+                {
+                  "id": "seg-play",
+                  "start_ms": 4000,
+                  "end_ms": 8000,
+                  "tags": [],
+                  "topics": [],
+                  "risk": "safe",
+                  "is_filler": false,
+                  "profiles": {
+                    "strict_parent": { "action": "play", "segment_id": "seg-play" },
+                    "adult": { "action": "play", "segment_id": "seg-play" }
+                  }
+                }
+              ]
+            }
+            """;
+
+        using var bvfFile = CreateTempBvfWithSegment(manifestJson, "seg-play");
+
+        var skipped = BVFReader.GetSegments(bvfFile, "strict_parent");
+        Assert.Single(skipped);
+        Assert.Equal("seg-play", skipped[0].segmentId);
+    }
+
+    [Fact]
     public void LoadBvfManifest_MissingSegmentTopics_DefaultsToEmpty()
     {
         var manifestJson = """

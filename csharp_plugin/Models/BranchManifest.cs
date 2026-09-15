@@ -67,6 +67,9 @@ public class Segment
     [JsonPropertyName("risk")]
     public string Risk { get; set; } = string.Empty;
 
+    [JsonPropertyName("profile_segment_id")]
+    public string? ProfileSegmentId { get; set; }
+
     [JsonPropertyName("profiles")]
     public Dictionary<string, SegmentProfileAction> Profiles { get; set; } = new();
 

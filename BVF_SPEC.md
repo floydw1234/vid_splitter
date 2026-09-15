@@ -93,6 +93,7 @@ the media assets referenced by the byte index.
       "start_ms": 0,
       "end_ms": 30000,
       "tags": [],
+      "topics": ["religion_christianity"],
       "risk": "safe",
       "media": {
         "asset_id": "seg_001",
@@ -109,6 +110,12 @@ the media assets referenced by the byte index.
   ]
 }
 ```
+
+The `profiles.*.filters` map is keyed by **tag or topic** name (`nudity`,
+`religion_christianity`, …). Authoring tools match those keys against each
+segment's `tags` and `topics` and bake the winning `play` / `swap` / `skip`
+action into `segments[].profiles`. Runtimes honor the baked actions; they do
+not re-run the LLM.
 
 Actions:
 

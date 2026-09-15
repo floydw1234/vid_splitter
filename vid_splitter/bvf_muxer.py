@@ -403,6 +403,7 @@ class BvfMuxer:
                 start_ms = int(seg["start_time"] * 1000)
                 end_ms = int(seg["end_time"] * 1000)
             tags = seg.get("tags", [])
+            topics = list(seg.get("topics") or [])
             risk = seg.get("risk", "safe")
             action = seg.get("action", "play")
             profile_segment_id = seg.get("profile_segment_id", seg_id)
@@ -415,17 +416,16 @@ class BvfMuxer:
                     _action_to_int(profile_data.get("action", "play"))
             else:
                 profile_entries = {}
-                tag_set = set(tags)
                 for pname in profile_names:
                     filter_actions = _normalize_profile_filters(
                         profiles.get(pname, {}).get("filters", {})
                     )
                     matching_actions = [
-                        filter_actions[tag] or action
-                        for tag in tag_set
-                        if tag in filter_actions
+                        filter_actions[key] or action
+                        for key in set(tags) | set(seg.get("topics") or [])
+                        if key in filter_actions
                     ]
-                    if risk != "safe" and not tag_set and action != "play":
+                    if risk != "safe" and not (set(tags) | set(seg.get("topics") or [])) and action != "play":
                         matching_actions = [action]
                     resolved_action = _most_restrictive_action(
                         matching_actions, default_action=action
@@ -444,6 +444,7 @@ class BvfMuxer:
                 "start_ms": start_ms,
                 "end_ms": end_ms,
                 "tags": tags,
+                "topics": topics,
                 "risk": risk,
                 "media": {
                     "asset_id": seg_id,
@@ -460,6 +461,8 @@ class BvfMuxer:
             }
             if seg.get("is_filler", False):
                 entry["is_filler"] = True
+            if seg.get("profile_segment_id"):
+                entry["profile_segment_id"] = seg["profile_segment_id"]
             manifest_segments.append(entry)
 
         return manifest_segments

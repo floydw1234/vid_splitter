@@ -365,7 +365,7 @@ public class SegmentServerStreamingTests
 
         Assert.NotNull(method);
 
-        var result = method!.Invoke(server, new object[] { bvfPath, profileKey });
+        var result = method!.Invoke(server, new object?[] { bvfPath, profileKey, null });
 
         var exception = result as TargetInvocationException;
         if (exception != null)

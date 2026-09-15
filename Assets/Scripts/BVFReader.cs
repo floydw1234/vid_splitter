@@ -426,6 +426,7 @@ public static class BVFReader
                 Topics = segment.Topics ?? new List<string>(),
                 Risk = segment.Risk ?? "safe",
                 IsFiller = segment.IsFiller,
+                ProfileSegmentId = segment.ProfileSegmentId,
                 Profiles = segment.Profiles ?? new Dictionary<string, SegmentProfileAction>(StringComparer.Ordinal),
             });
         }
@@ -525,6 +526,9 @@ public static class BVFReader
 
         [JsonPropertyName("topics")]
         public List<string>? Topics { get; set; }
+
+        [JsonPropertyName("profile_segment_id")]
+        public string? ProfileSegmentId { get; set; }
 
         [JsonPropertyName("risk")]
         public string? Risk { get; set; }

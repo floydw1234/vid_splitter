@@ -72,6 +72,50 @@ def test_adult_sequence_keeps_all_segments(tmp_path: Path):
     assert [entry["target_id"] for entry in sequence] == ["seg_001", "seg_002"]
 
 
+def test_strict_parent_skips_christianity_topic(tmp_path: Path):
+    profiles = {
+        "strict_parent": {
+            "name": "strict_parent",
+            "filters": {"religion_christianity": "skip"},
+        },
+        "adult": {"name": "Adult", "filters": {}},
+    }
+    segments = [
+        {
+            "id": "seg_001",
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "tags": [],
+            "topics": [],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-safe",
+        },
+        {
+            "id": "seg_002",
+            "start_time": 2.0,
+            "end_time": 4.0,
+            "tags": [],
+            "topics": ["religion_christianity"],
+            "risk": "safe",
+            "action": "play",
+            "media_container": "fmp4",
+            "media_payload": b"ftyp....moov....moof....mdat-sermon",
+        },
+    ]
+    bvf = BvfMuxer(movie_id="fixture", title="Fixture").write_bvf(
+        tmp_path / "fixture.bvf",
+        segments=segments,
+        duration_seconds=4.0,
+        profiles=profiles,
+    )
+    child_seq = BVFPlayer(bvf, profile="strict_parent").resolve_playback_sequence()
+    adult_seq = BVFPlayer(bvf, profile="adult").resolve_playback_sequence()
+    assert [entry["target_id"] for entry in child_seq] == ["seg_001"]
+    assert [entry["target_id"] for entry in adult_seq] == ["seg_001", "seg_002"]
+
+
 def test_dry_run_json_outputs_deterministic_segment_payload(tmp_path: Path):
     bvf = _write_fixture(tmp_path)
 

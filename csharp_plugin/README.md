@@ -238,6 +238,7 @@ Key fields:
 - `segments[].media`: fMP4/CMAF asset metadata for the indexed payload
 - `segments[].profiles`: per-profile action and target segment mapping
 - Runtime-supported profile actions: `play`, `swap`, `skip`
+- Per-user hit action (plugin config): `skip` or `swap` when an avoided topic hits; swap falls back to skip if the BVF has no filler clip
 - Reserved manifest actions rejected by current runtimes: `blur`, `mute`
 
 ## Troubleshooting

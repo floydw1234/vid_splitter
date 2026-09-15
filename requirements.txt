@@ -1,6 +1,7 @@
 # Analyzer Dependencies (Python CLI tool — run once per movie)
 ffmpeg-python
 openai-whisper
+# CUDA 13 (Spark/GB10): pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 torch
 # Marlin-2B alternative analyzer path
 transformers

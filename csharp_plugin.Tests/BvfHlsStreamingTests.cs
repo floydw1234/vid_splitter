@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Text;
 using Jellyfin.Plugin.SmartBranching;
@@ -37,8 +38,7 @@ public class BvfHlsPlaylistBuilderTests
     [Fact]
     public void Build_WithGapsAndSwaps_EmitsNoDiscontinuities()
     {
-        // Timestamps are rewritten into one continuous timeline server-side, so
-        // skips and swaps must not produce discontinuity tags.
+        // Legacy fallback path (no timeline): one EXTINF per resolved segment.
         var segments = new[]
         {
             MakeSegment(startSec: 0, endSec: 5, durationMs: 5000),
@@ -47,6 +47,85 @@ public class BvfHlsPlaylistBuilderTests
         };
 
         var playlist = BvfHlsPlaylistBuilder.Build(segments, string.Empty);
+
+        Assert.DoesNotContain("#EXT-X-DISCONTINUITY", playlist, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildFromTimeline_WithNonConsecutiveSegmentChange_EmitsDiscontinuity()
+    {
+        var timeline = new BvfHlsTimeline
+        {
+            Tracks = Array.Empty<Fmp4TimestampRewriter.TrackInfo>(),
+            VideoTrackId = 1,
+            VideoTimescale = 90000,
+            Parts = new[]
+            {
+                new BvfHlsPart
+                {
+                    ResolvedIndex = 0,
+                    PayloadStart = 0,
+                    PayloadLength = 100,
+                    TimestampOffsetTicks = 0,
+                    DurationSeconds = 5,
+                    ClampAudio = true,
+                    SegmentStart = true,
+                },
+                new BvfHlsPart
+                {
+                    ResolvedIndex = 2,
+                    PayloadStart = 0,
+                    PayloadLength = 100,
+                    TimestampOffsetTicks = 450000,
+                    DurationSeconds = 5,
+                    ClampAudio = true,
+                    SegmentStart = true,
+                },
+            },
+            SegmentDurationsSeconds = new[] { 5.0, 5.0 },
+        };
+
+        var playlist = BvfHlsPlaylistBuilder.BuildFromTimeline(timeline, "?api_key=abc");
+
+        Assert.Contains("#EXT-X-DISCONTINUITY", playlist, StringComparison.Ordinal);
+        Assert.Contains("1.m4s?api_key=abc", playlist, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildFromTimeline_WithConsecutiveSegments_OmitsDiscontinuity()
+    {
+        var timeline = new BvfHlsTimeline
+        {
+            Tracks = Array.Empty<Fmp4TimestampRewriter.TrackInfo>(),
+            VideoTrackId = 1,
+            VideoTimescale = 90000,
+            Parts = new[]
+            {
+                new BvfHlsPart
+                {
+                    ResolvedIndex = 0,
+                    PayloadStart = 0,
+                    PayloadLength = 100,
+                    TimestampOffsetTicks = 0,
+                    DurationSeconds = 5,
+                    ClampAudio = true,
+                    SegmentStart = true,
+                },
+                new BvfHlsPart
+                {
+                    ResolvedIndex = 1,
+                    PayloadStart = 0,
+                    PayloadLength = 100,
+                    TimestampOffsetTicks = 450000,
+                    DurationSeconds = 5,
+                    ClampAudio = true,
+                    SegmentStart = true,
+                },
+            },
+            SegmentDurationsSeconds = new[] { 5.0, 5.0 },
+        };
+
+        var playlist = BvfHlsPlaylistBuilder.BuildFromTimeline(timeline, string.Empty);
 
         Assert.DoesNotContain("#EXT-X-DISCONTINUITY", playlist, StringComparison.Ordinal);
     }
@@ -219,6 +298,128 @@ public class Fmp4TimestampRewriterTests
         }
 
         throw new InvalidOperationException("no tfdt found");
+    }
+
+    [Fact]
+    public void StripAudioEncoderPriming_RemovesNonStandardLeadingAacFrame()
+    {
+        var fixture = ResolveMsRachelSegmentFixture();
+        if (fixture == null)
+            return;
+
+        var payload = File.ReadAllBytes(fixture);
+        var (_, initLength) = Fmp4ConcatHelper.GetInitRange(payload);
+        var init = payload.AsSpan(0, (int)initLength).ToArray();
+        var tracks = Fmp4TimestampRewriter.ParseTracks(payload.AsSpan(0, (int)initLength));
+        var audio = tracks.FirstOrDefault(track => !track.IsVideo);
+        Assert.NotEqual(default, audio);
+
+        var (mediaStart, mediaLength) = Fmp4ConcatHelper.GetMediaRange(payload);
+        var media = payload.AsSpan((int)mediaStart, (int)mediaLength).ToArray();
+        var before = Fmp4TimestampRewriter.CountTrunSamples(media, audio.TrackId);
+        Assert.True(Fmp4TimestampRewriter.TryReadFirstTrunSampleDuration(media, audio.TrackId, out var firstDuration));
+        Assert.True(firstDuration > 1024);
+
+        Fmp4TimestampRewriter.StripAudioEncoderPriming(media, tracks);
+
+        Assert.Equal(before - 1, Fmp4TimestampRewriter.CountTrunSamples(media, audio.TrackId));
+        Assert.True(Fmp4TimestampRewriter.TryReadFirstTrunSampleDuration(media, audio.TrackId, out var trimmedFirst));
+        Assert.Equal(1024u, trimmedFirst);
+        Assert.True(FfprobeAcceptsFragment(init, media), FfprobeDescribe(init, media));
+    }
+
+    [Fact]
+    public void AssembledMediaRange_ValidatesWithFfprobe()
+    {
+        if (!FfmpegTestHelpers.IsAvailable())
+            return;
+
+        var fixture = ResolveMsRachelSegmentFixture();
+        if (fixture == null)
+            return;
+
+        var payload = File.ReadAllBytes(fixture);
+        var (_, initLength) = Fmp4ConcatHelper.GetInitRange(payload);
+        var init = payload.AsSpan(0, (int)initLength).ToArray();
+        var tracks = Fmp4TimestampRewriter.ParseTracks(payload.AsSpan(0, (int)initLength));
+        var (mediaStart, mediaLength) = Fmp4ConcatHelper.GetMediaRange(payload);
+        var media = payload.AsSpan((int)mediaStart, (int)mediaLength).ToArray();
+
+        Fmp4TimestampRewriter.StripAudioEncoderPriming(media, tracks);
+        Fmp4TimestampRewriter.SyncAudioStartToVideo(media, tracks);
+        Fmp4TimestampRewriter.ClampAudioToVideoDuration(media, tracks);
+
+        Assert.True(FfprobeAcceptsFragment(init, media), FfprobeDescribe(init, media));
+    }
+
+    private static bool FfprobeAcceptsFragment(byte[] init, byte[] media)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"bvf-fragment-{Guid.NewGuid():N}.mp4");
+        try
+        {
+            using (var stream = File.Create(path))
+            {
+                stream.Write(init);
+                stream.Write(media);
+            }
+
+            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = ResolveFfprobePath(),
+                Arguments = $"-v error -show_format \"{path}\"",
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            process?.WaitForExit(10_000);
+            return process?.ExitCode == 0;
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    private static string FfprobeDescribe(byte[] init, byte[] media)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"bvf-fragment-{Guid.NewGuid():N}.mp4");
+        try
+        {
+            using (var stream = File.Create(path))
+            {
+                stream.Write(init);
+                stream.Write(media);
+            }
+
+            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = ResolveFfprobePath(),
+                Arguments = $"-v error \"{path}\"",
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            return process?.StandardError.ReadToEnd() ?? "ffprobe unavailable";
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    private static string ResolveFfprobePath()
+    {
+        const string jellyfinBundled = "/usr/lib/jellyfin-ffmpeg/ffprobe";
+        return File.Exists(jellyfinBundled) ? jellyfinBundled : "ffprobe";
+    }
+
+    private static string? ResolveMsRachelSegmentFixture()
+    {
+        const string cached = "/tmp/seg_002.mp4";
+        return File.Exists(cached) ? cached : null;
     }
 
     private static uint ReadUInt32(byte[] buffer, int offset)

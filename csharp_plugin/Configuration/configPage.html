@@ -5,82 +5,29 @@
     <title>Smart Branching</title>
 </head>
 <body>
-    <div id="smartBranchingConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
+    <div id="smartBranchingConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
         <div data-role="content">
             <div class="content-primary">
                 <form id="smartBranchingConfigForm">
                     <div class="verticalSection verticalSection-extrabottompadding">
                         <h3 class="headingKey cardHeading">Smart Branching</h3>
-                        <p>Configure how mature content is handled for different user profiles.</p>
-                    </div>
-
-                    <div class="verticalSection verticalSection-extrabottompadding">
-                        <h3 class="headingKey cardHeading">General Settings</h3>
+                        <p class="fieldDescription">
+                            Click a cell to mark a topic as avoided for that user.
+                            Skip vs swap is that user's action when a labeled scene hits.
+                            Swap uses replacement clips already in the BVF; if none exist, it skips.
+                        </p>
                         <div class="inputContainer">
                             <label class="emby-checkbox-label">
                                 <input is="emby-checkbox" id="enableSmartBranching" type="checkbox" />
                                 <span>Enable Smart Branching</span>
                             </label>
                         </div>
-
-                        <div class="selectContainer">
-                            <label class="selectLabel" for="defaultProfile">Default Profile (unknown users)</label>
-                            <select is="emby-select" id="defaultProfile" name="defaultProfile" class="emby-select-withcolor emby-select">
-                                <option value="child">Child (Age 10)</option>
-                                <option value="teen_m">Teen Male (Age 15)</option>
-                                <option value="teen_f">Teen Female (Age 15)</option>
-                                <option value="adult" selected>Adult (Age 18)</option>
-                            </select>
-                        </div>
-
-                        <div class="inputContainer">
-                            <label class="inputLabel inputLabelUnfocused" for="nsfwThreshold">NSFW Confidence Threshold</label>
-                            <input is="emby-input" id="nsfwThreshold" name="nsfwThreshold" type="number" min="0" max="1" step="0.1" value="0.75" />
-                            <div class="fieldDescription">Minimum confidence to flag a frame as NSFW</div>
-                        </div>
-
-                        <div class="inputContainer">
-                            <label class="inputLabel inputLabelUnfocused" for="fillerDirectory">Filler Video Directory</label>
-                            <input is="emby-input" id="fillerDirectory" name="fillerDirectory" type="text" value="smart_branching/filler" />
-                            <div class="fieldDescription">Directory containing fMP4/CMAF filler assets for swapping mature content</div>
-                        </div>
-
-                        <div class="selectContainer">
-                            <label class="selectLabel" for="defaultAction">Default Mature Content Action</label>
-                            <select is="emby-select" id="defaultAction" name="defaultAction" class="emby-select-withcolor emby-select">
-                                <option value="swap">Swap with filler</option>
-                                <option value="skip">Skip segment</option>
-                                <option value="blur">Blur (future)</option>
-                                <option value="mute">Mute audio (future)</option>
-                            </select>
-                        </div>
                     </div>
 
                     <div class="verticalSection verticalSection-extrabottompadding">
-                        <h3 class="headingKey cardHeading">User Profiles</h3>
-                        <div class="editorFieldSet">
-                            <p>
-                                Set each user&rsquo;s birthday and sex so the plugin can automatically resolve
-                                the correct content profile. Optionally override the resolved profile directly.
-                            </p>
-                            <table class="tblApiKeys detailTable" id="userProfilesTable" style="width:100%">
-                                <thead>
-                                    <tr>
-                                        <th>User</th>
-                                        <th>Birthday</th>
-                                        <th>Sex</th>
-                                        <th>Override</th>
-                                        <th>Resolved Profile</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="userProfileTableBody">
-                                    <tr>
-                                        <td colspan="5" style="text-align:center; padding: 1em;">
-                                            Loading users...
-                                        </td>
-                                    </tr>
-                                </tbody>
-                            </table>
+                        <h3 class="headingKey cardHeading">Avoided topics</h3>
+                        <div id="userTopicList">
+                            <p>Loading users...</p>
                         </div>
                     </div>
 
@@ -93,149 +40,277 @@
             </div>
         </div>
 
+        <style>
+            .sb-grid-wrap { overflow-x: auto; margin: 0.5em 0 1em; }
+            .sb-grid { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 0.92em; }
+            .sb-grid th, .sb-grid td { padding: 0.35em 0.7em; border-bottom: 1px solid rgba(128,128,128,0.25); }
+            .sb-grid thead th { position: sticky; top: 0; z-index: 1; font-weight: 600; text-align: center; white-space: nowrap; }
+            .sb-grid .sb-topic { text-align: left; white-space: nowrap; padding-left: 0.2em; }
+            .sb-grid .sb-group td { font-weight: 650; padding-top: 0.9em; padding-bottom: 0.25em; opacity: 0.8; border-bottom: none; }
+            .sb-cell { text-align: center; cursor: pointer; user-select: none; min-width: 4.5em; }
+            .sb-cell button {
+                width: 1.6em; height: 1.6em; border-radius: 4px; border: 1px solid rgba(128,128,128,0.45);
+                background: transparent; color: inherit; cursor: pointer; padding: 0; line-height: 1.5em;
+            }
+            .sb-cell button[aria-pressed="true"] { background: #3fa34d; border-color: #3fa34d; color: #fff; }
+            .sb-hit { display: flex; gap: 0.25em; justify-content: center; }
+            .sb-hit-action {
+                font-size: 0.78em; padding: 0.15em 0.45em; border-radius: 4px;
+                border: 1px solid rgba(128,128,128,0.45); background: transparent;
+                color: inherit; cursor: pointer; line-height: 1.4;
+            }
+            .sb-hit-action[aria-pressed="true"] { background: #3fa34d; border-color: #3fa34d; color: #fff; }
+            .sb-hit-row th { font-weight: 500; font-size: 0.85em; }
+            .sb-add { display: flex; gap: 0.5em; align-items: end; max-width: 28em; }
+            .sb-topic-label { display: inline-flex; align-items: center; gap: 0.4em; }
+            .sb-remove-topic {
+                width: 1.4em; height: 1.4em; border-radius: 4px; border: 1px solid rgba(128,128,128,0.45);
+                background: transparent; color: inherit; cursor: pointer; padding: 0; line-height: 1.2em;
+                font-size: 1.1em; opacity: 0.75;
+            }
+            .sb-remove-topic:hover { opacity: 1; border-color: #c44; color: #c44; }
+        </style>
+
         <script type="text/javascript">
             (function () {
                 var pluginUniqueId = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
                 var _loadingConfig = false;
+                var TOPIC_GROUPS = [
+                    { name: 'Mature', topics: ['nudity', 'language', 'profanity', 'violence', 'gore', 'fear', 'sex_education', 'violence_domestic', 'self_harm'] },
+                    { name: 'Substances', topics: ['drugs', 'alcohol', 'smoking'] },
+                    { name: 'Beliefs & identity', topics: ['religion_christianity', 'religion_general', 'politics', 'feminism', 'masculinity', 'lgbtq', 'racism'] },
+                    { name: 'Other', topics: ['war_military', 'mental_health', 'death_grief', 'crime'] }
+                ];
+                var KNOWN_TOPICS = [];
+                TOPIC_GROUPS.forEach(function (group) {
+                    group.topics.forEach(function (topic) { KNOWN_TOPICS.push(topic); });
+                });
+
+                var _users = [];
+                var _selected = {};
+                var _hitAction = {};
+                var _extraTopics = [];
 
                 function getElement(selector) {
                     return document.querySelector(selector);
                 }
 
-                function setTableLoading(message, isError) {
-                    var tbody = getElement('#userProfileTableBody');
-                    if (!tbody) return;
-                    var color = isError ? 'color:red;' : '';
-                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 1em; ' + color + '">' + message + '</td></tr>';
-                }
-
                 function showError(message) {
-                    setTableLoading(message, true);
+                    var host = getElement('#userTopicList');
+                    if (host) {
+                        host.innerHTML = '<p style="color:red">' + escapeHtml(message) + '</p>';
+                    }
                     if (window.Dashboard && typeof Dashboard.alert === 'function') {
                         Dashboard.alert(message);
                     }
                 }
 
-                function resolveProfile(birthday, sex, override) {
-                    if (override && override !== '') {
-                        return override;
-                    }
-                    if (!birthday) {
-                        return '—';
-                    }
-                    var dob = new Date(birthday);
-                    var today = new Date();
-                    var age = today.getUTCFullYear() - dob.getUTCFullYear();
-                    var m = today.getUTCMonth() - dob.getUTCMonth();
-                    if (m < 0 || (m === 0 && today.getUTCDate() < dob.getUTCDate())) {
-                        age--;
-                    }
-
-                    if (age < 13) {
-                        return 'child';
-                    }
-                    if (age < 18) {
-                        return sex === 'female' ? 'teen_f' : 'teen_m';
-                    }
-
-                    return 'adult';
+                function escapeHtml(value) {
+                    return String(value || '')
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;');
                 }
 
-                function profileBadgeStyle(profile) {
-                    var colors = {
-                        child: '#4caf50',
-                        teen_m: '#2196f3',
-                        teen_f: '#e91e63',
-                        adult: '#9e9e9e'
-                    };
-                    var color = colors[profile] || '#9e9e9e';
-                    return 'display:inline-block;padding:2px 8px;border-radius:3px;background:' + color + ';color:#fff;font-size:0.85em;';
+                function normalizeTopics(topics) {
+                    if (Array.isArray(topics)) {
+                        return topics.map(function (part) { return String(part).trim(); }).filter(Boolean);
+                    }
+                    if (typeof topics === 'string') {
+                        return topics.split(',').map(function (part) { return part.trim(); }).filter(Boolean);
+                    }
+                    return [];
                 }
 
-                function updateResolvedCell(row) {
-                    if (!row) {
+                function normalizeHitAction(value, fallback) {
+                    var raw = String(value || fallback || 'skip').trim().toLowerCase();
+                    return raw === 'swap' ? 'swap' : 'skip';
+                }
+
+                function hitActionForUser(userId) {
+                    return normalizeHitAction(_hitAction[userId], 'skip');
+                }
+
+                function setHitAction(userId, action) {
+                    _hitAction[userId] = normalizeHitAction(action, 'skip');
+                    document.querySelectorAll('.sb-hit-action[data-user="' + cssEscape(userId) + '"]').forEach(function (button) {
+                        var on = button.getAttribute('data-action') === _hitAction[userId];
+                        button.setAttribute('aria-pressed', on ? 'true' : 'false');
+                    });
+                }
+
+                function hitActionHtml(userId) {
+                    var current = hitActionForUser(userId);
+                    function btn(action, label) {
+                        var on = current === action;
+                        return '<button type="button" class="sb-hit-action" data-user="' + escapeHtml(userId) +
+                            '" data-action="' + action + '" aria-pressed="' + (on ? 'true' : 'false') +
+                            '" title="' + label + ' when an avoided topic is on screen">' + label + '</button>';
+                    }
+                    return '<div class="sb-hit">' + btn('skip', 'Skip') + btn('swap', 'Swap') + '</div>';
+                }
+
+                function isOn(userId, topic) {
+                    var set = _selected[userId];
+                    return !!(set && set[topic]);
+                }
+
+                function toggleCell(userId, topic) {
+                    if (!_selected[userId]) {
+                        _selected[userId] = {};
+                    }
+                    if (_selected[userId][topic]) {
+                        delete _selected[userId][topic];
+                    } else {
+                        _selected[userId][topic] = true;
+                    }
+                    var button = document.querySelector('.sb-toggle[data-user="' + cssEscape(userId) + '"][data-topic="' + cssEscape(topic) + '"]');
+                    if (button) {
+                        var on = isOn(userId, topic);
+                        button.setAttribute('aria-pressed', on ? 'true' : 'false');
+                        button.textContent = on ? '✓' : '';
+                    }
+                }
+
+                function cellHtml(userId, topic) {
+                    var on = isOn(userId, topic);
+                    return '<td class="sb-cell"><button type="button" class="sb-toggle" data-user="' + escapeHtml(userId) +
+                        '" data-topic="' + escapeHtml(topic) + '" aria-pressed="' + (on ? 'true' : 'false') +
+                        '" title="' + escapeHtml(topic) + '">' + (on ? '✓' : '') + '</button></td>';
+                }
+
+                function extraTopicsFromState() {
+                    var extras = [];
+                    var seen = {};
+                    function add(topic) {
+                        if (!topic || KNOWN_TOPICS.indexOf(topic) !== -1 || seen[topic]) {
+                            return;
+                        }
+                        seen[topic] = true;
+                        extras.push(topic);
+                    }
+                    _extraTopics.forEach(add);
+                    Object.keys(_selected).forEach(function (userId) {
+                        Object.keys(_selected[userId]).forEach(add);
+                    });
+                    extras.sort();
+                    return extras;
+                }
+
+                function addCustomTopic(raw) {
+                    var topic = String(raw || '').trim();
+                    if (!topic) {
+                        return;
+                    }
+                    if (KNOWN_TOPICS.indexOf(topic) === -1 && _extraTopics.indexOf(topic) === -1) {
+                        _extraTopics.push(topic);
+                    }
+                    renderGrid();
+                    var row = document.querySelector('.sb-topic[data-topic-label="' + cssEscape(topic) + '"]');
+                    if (row && row.scrollIntoView) {
+                        row.scrollIntoView({ block: 'center' });
+                    }
+                }
+
+                function removeCustomTopic(topic) {
+                    topic = String(topic || '').trim();
+                    if (!topic || KNOWN_TOPICS.indexOf(topic) !== -1) {
+                        return;
+                    }
+                    _extraTopics = _extraTopics.filter(function (item) { return item !== topic; });
+                    Object.keys(_selected).forEach(function (userId) {
+                        if (_selected[userId]) {
+                            delete _selected[userId][topic];
+                        }
+                    });
+                    renderGrid();
+                }
+
+                function cssEscape(value) {
+                    if (window.CSS && typeof CSS.escape === 'function') {
+                        return CSS.escape(value);
+                    }
+                    return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+                }
+
+                function renderGrid() {
+                    var host = getElement('#userTopicList');
+                    if (!host) {
+                        return;
+                    }
+                    if (_users.length === 0) {
+                        host.innerHTML = '<p>No users found</p>';
                         return;
                     }
 
-                    var birthday = row.querySelector('.userBirthday');
-                    var sex = row.querySelector('.userSex');
-                    var override = row.querySelector('.userOverride');
-                    var cell = row.querySelector('.resolvedProfile');
+                    var extras = extraTopicsFromState();
+                    var head = '<th class="sb-topic">Topic</th>';
+                    var hitHead = '<th class="sb-topic">On a hit</th>';
+                    _users.forEach(function (user) {
+                        head += '<th>' + escapeHtml(user.Name || user.Id) + '</th>';
+                        hitHead += '<th>' + hitActionHtml(user.Id) + '</th>';
+                    });
 
-                    if (!birthday || !sex || !override || !cell) {
-                        return;
+                    var body = '';
+                    function addRows(topics, removable) {
+                        topics.forEach(function (topic) {
+                            var remove = removable
+                                ? '<button type="button" class="sb-remove-topic" data-topic="' + escapeHtml(topic) +
+                                  '" title="Remove custom topic" aria-label="Remove ' + escapeHtml(topic) + '">×</button>'
+                                : '';
+                            var row = '<tr><th class="sb-topic" scope="row" data-topic-label="' + escapeHtml(topic) +
+                                '"><span class="sb-topic-label">' + escapeHtml(topic) + remove + '</span></th>';
+                            _users.forEach(function (user) {
+                                row += cellHtml(user.Id, topic);
+                            });
+                            body += row + '</tr>';
+                        });
                     }
 
-                    var profile = resolveProfile(birthday.value, sex.value, override.value);
-                    cell.innerHTML = '<span style="' + profileBadgeStyle(profile) + '">' + profile + '</span>';
+                    TOPIC_GROUPS.forEach(function (group) {
+                        body += '<tr class="sb-group"><td colspan="' + (_users.length + 1) + '">' + escapeHtml(group.name) + '</td></tr>';
+                        addRows(group.topics);
+                    });
+                    body += '<tr class="sb-group"><td colspan="' + (_users.length + 1) + '">Custom</td></tr>';
+                    if (extras.length) {
+                        addRows(extras, true);
+                    } else {
+                        body += '<tr><td class="sb-topic" colspan="' + (_users.length + 1) + '" style="opacity:0.65">None yet — add one below</td></tr>';
+                    }
+
+                    host.innerHTML =
+                        '<div class="sb-grid-wrap"><table class="sb-grid"><thead><tr>' + head +
+                        '</tr><tr class="sb-hit-row">' + hitHead + '</tr></thead><tbody>' + body + '</tbody></table></div>' +
+                        '<div class="sb-add inputContainer">' +
+                        '<div><label class="inputLabel" for="sbAddTopic">Add a custom topic</label>' +
+                        '<input id="sbAddTopic" type="text" class="emby-input" placeholder="e.g. spoilers" autocomplete="off" /></div>' +
+                        '<button type="button" class="raised emby-button" id="sbAddTopicBtn">Add</button>' +
+                        '</div>';
                 }
 
-                function buildUserRow(user, stored) {
-                    var tr = document.createElement('tr');
-                    tr.dataset.userId = user.Id || '';
-                    stored = stored || {};
-
-                    tr.innerHTML =
-                        '<td style="font-weight:500">' + (user.Name || '') + '</td>' +
-                        '<td><input type="date" class="emby-input userBirthday" value="' + (stored.Birthday || '') + '" style="width:140px" /></td>' +
-                        '<td>' +
-                        '  <select class="emby-select userSex" style="width:100px">' +
-                        '    <option value="unset"' + ((stored.Sex === 'unset' || !stored.Sex) ? ' selected' : '') + '>Not set</option>' +
-                        '    <option value="male"' + (stored.Sex === 'male' ? ' selected' : '') + '>Male</option>' +
-                        '    <option value="female"' + (stored.Sex === 'female' ? ' selected' : '') + '>Female</option>' +
-                        '  </select>' +
-                        '</td>' +
-                        '<td>' +
-                        '  <select class="emby-select userOverride" style="width:110px">' +
-                        '    <option value=""' + (!stored.ProfileOverride ? ' selected' : '') + '>Auto</option>' +
-                        '    <option value="child"' + (stored.ProfileOverride === 'child' ? ' selected' : '') + '>Child</option>' +
-                        '    <option value="teen_m"' + (stored.ProfileOverride === 'teen_m' ? ' selected' : '') + '>Teen (M)</option>' +
-                        '    <option value="teen_f"' + (stored.ProfileOverride === 'teen_f' ? ' selected' : '') + '>Teen (F)</option>' +
-                        '    <option value="adult"' + (stored.ProfileOverride === 'adult' ? ' selected' : '') + '>Adult</option>' +
-                        '  </select>' +
-                        '</td>' +
-                        '<td class="resolvedProfile"></td>';
-
-                    tr.querySelector('.userBirthday').addEventListener('change', function () {
-                        updateResolvedCell(tr);
-                    });
-                    tr.querySelector('.userSex').addEventListener('change', function () {
-                        updateResolvedCell(tr);
-                    });
-                    tr.querySelector('.userOverride').addEventListener('change', function () {
-                        updateResolvedCell(tr);
-                    });
-
-                    updateResolvedCell(tr);
-                    return tr;
+                function topicsForUser(userId) {
+                    var set = _selected[userId] || {};
+                    return Object.keys(set).sort();
                 }
 
                 function normalizeUsersResponse(response) {
                     if (Array.isArray(response)) {
                         return response;
                     }
-
-                    if (!response) {
-                        return [];
-                    }
-
-                    if (Array.isArray(response.Items)) {
+                    if (response && Array.isArray(response.Items)) {
                         return response.Items;
                     }
-
                     return [];
                 }
 
                 function loadUsers(savedConfig) {
-                    var tbody = getElement('#userProfileTableBody');
-                    if (!tbody) {
+                    var host = getElement('#userTopicList');
+                    if (!host) {
                         return Promise.resolve();
                     }
-
-                    tbody.innerHTML = '';
-
                     if (!window.ApiClient || typeof ApiClient.getUsers !== 'function') {
-                        setTableLoading('API does not support user lookup', true);
+                        showError('API does not support user lookup');
                         return Promise.resolve();
                     }
 
@@ -246,41 +321,48 @@
                                 stored[entry.UserId] = entry.Profile;
                             }
                         });
-                    } else if (savedConfig && savedConfig.UserProfiles && typeof savedConfig.UserProfiles === 'object') {
-                        stored = savedConfig.UserProfiles;
                     }
 
                     var timerId = null;
-                    var usersPromise = ApiClient.getUsers();
                     var timeoutPromise = new Promise(function (_, reject) {
                         timerId = setTimeout(function () {
                             reject(new Error('getUsers timed out after 5s'));
                         }, 5000);
                     });
 
-                    return Promise.race([usersPromise, timeoutPromise])
+                    return Promise.race([ApiClient.getUsers(), timeoutPromise])
                         .then(function (response) {
                             if (timerId) {
                                 clearTimeout(timerId);
                             }
-
-                            var users = normalizeUsersResponse(response);
-
-                            users.forEach(function (user) {
-                                var row = buildUserRow(user, stored[user.Id] || {});
-                                tbody.appendChild(row);
+                            _users = normalizeUsersResponse(response);
+                            _selected = {};
+                            _hitAction = {};
+                            _extraTopics = normalizeTopics(
+                                (savedConfig && (savedConfig.CustomTopics || savedConfig.customTopics)) || []
+                            );
+                            var defaultHit = normalizeHitAction(
+                                savedConfig && (savedConfig.DefaultAction || savedConfig.defaultAction),
+                                'skip'
+                            );
+                            _users.forEach(function (user) {
+                                var profile = stored[user.Id] || {};
+                                _selected[user.Id] = {};
+                                _hitAction[user.Id] = normalizeHitAction(
+                                    profile.HitAction || profile.hitAction,
+                                    defaultHit
+                                );
+                                normalizeTopics(profile.Topics).forEach(function (topic) {
+                                    _selected[user.Id][topic] = true;
+                                });
                             });
-
-                            if (users.length === 0) {
-                                setTableLoading('No users found', false);
-                            }
+                            renderGrid();
                         })
                         .catch(function (err) {
                             if (timerId) {
                                 clearTimeout(timerId);
                             }
-
-                            setTableLoading('Failed to load users: ' + (err && err.message ? err.message : 'unknown error'), true);
+                            showError('Failed to load users: ' + (err && err.message ? err.message : 'unknown error'));
                         });
                 }
 
@@ -288,9 +370,8 @@
                     if (_loadingConfig) {
                         return;
                     }
-
                     if (!window.ApiClient || typeof ApiClient.getPluginConfiguration !== 'function') {
-                        setTableLoading('API client not available', true);
+                        showError('API client not available');
                         return;
                     }
 
@@ -301,22 +382,14 @@
 
                     ApiClient.getPluginConfiguration(pluginUniqueId)
                         .then(function (config) {
-                            var pageForm = getElement('#smartBranchingConfigForm');
-                            if (!pageForm) {
+                            if (!getElement('#smartBranchingConfigForm')) {
                                 throw new Error('Config page not available');
                             }
-
                             getElement('#enableSmartBranching').checked = config.Enabled !== false;
-                            getElement('#defaultProfile').value = config.DefaultProfile || 'adult';
-                            getElement('#nsfwThreshold').value = (config.NsfwThreshold !== undefined && config.NsfwThreshold !== null) ? config.NsfwThreshold : 0.75;
-                            getElement('#fillerDirectory').value = config.FillerDirectory || 'smart_branching/filler';
-                            getElement('#defaultAction').value = config.DefaultAction || 'swap';
-
                             return loadUsers(config);
                         })
                         .catch(function (err) {
-                            var msg = 'Failed to load Smart Branching settings: ' + (err && err.message ? err.message : 'unknown error');
-                            showError(msg);
+                            showError('Failed to load Smart Branching settings: ' + (err && err.message ? err.message : 'unknown error'));
                         })
                         .finally(function () {
                             if (window.Dashboard && typeof Dashboard.hideLoadingMsg === 'function') {
@@ -330,12 +403,10 @@
                     if (e && e.preventDefault) {
                         e.preventDefault();
                     }
-
                     if (!window.ApiClient || typeof ApiClient.updatePluginConfiguration !== 'function') {
                         showError('API client not available');
                         return false;
                     }
-
                     if (window.Dashboard && typeof Dashboard.showLoadingMsg === 'function') {
                         Dashboard.showLoadingMsg();
                     }
@@ -343,37 +414,30 @@
                     ApiClient.getPluginConfiguration(pluginUniqueId)
                         .then(function (config) {
                             config.Enabled = getElement('#enableSmartBranching').checked;
-                            config.DefaultProfile = getElement('#defaultProfile').value;
-                            config.NsfwThreshold = parseFloat(getElement('#nsfwThreshold').value);
-                            config.FillerDirectory = getElement('#fillerDirectory').value;
-                            config.DefaultAction = getElement('#defaultAction').value;
-
-                            var rows = document.querySelectorAll('#userProfileTableBody tr[data-user-id]');
-                            var entries = [];
-
-                            rows.forEach(function (row) {
-                                var uid = row.dataset.userId;
-                                var birthday = row.querySelector('.userBirthday');
-                                var sex = row.querySelector('.userSex');
-                                var override = row.querySelector('.userOverride');
-
-                                if (!uid || !birthday || !sex || !override) {
-                                    return;
-                                }
-
-                                entries.push({
-                                    UserId: uid,
-                                    Profile: {
-                                        Birthday: birthday.value || null,
-                                        Sex: sex.value,
-                                        ProfileOverride: override.value || null
+                            var existing = {};
+                            if (Array.isArray(config.UserProfileEntries)) {
+                                config.UserProfileEntries.forEach(function (entry) {
+                                    if (entry && entry.UserId && entry.Profile) {
+                                        existing[entry.UserId] = entry.Profile;
                                     }
                                 });
+                            }
+                            var entries = _users.map(function (user) {
+                                var previous = existing[user.Id] || {};
+                                return {
+                                    UserId: user.Id,
+                                    Profile: {
+                                        Birthday: previous.Birthday || null,
+                                        Sex: previous.Sex || 'unset',
+                                        ProfileOverride: previous.ProfileOverride || null,
+                                        Topics: topicsForUser(user.Id),
+                                        HitAction: hitActionForUser(user.Id)
+                                    }
+                                };
                             });
-
                             config.UserProfileEntries = entries;
+                            config.CustomTopics = extraTopicsFromState();
                             delete config.UserProfiles;
-
                             return ApiClient.updatePluginConfiguration(pluginUniqueId, config);
                         })
                         .then(function (result) {
@@ -397,10 +461,46 @@
                 if (page) {
                     page.addEventListener('pageshow', loadConfig);
                 }
-
                 var form = getElement('#smartBranchingConfigForm');
                 if (form) {
                     form.addEventListener('submit', saveConfig);
+                    form.addEventListener('click', function (e) {
+                        var toggle = e.target.closest && e.target.closest('.sb-toggle');
+                        if (toggle) {
+                            e.preventDefault();
+                            toggleCell(toggle.getAttribute('data-user'), toggle.getAttribute('data-topic'));
+                            return;
+                        }
+                        var hit = e.target.closest && e.target.closest('.sb-hit-action');
+                        if (hit) {
+                            e.preventDefault();
+                            setHitAction(hit.getAttribute('data-user'), hit.getAttribute('data-action'));
+                            return;
+                        }
+                        if (e.target.closest && e.target.closest('.sb-remove-topic')) {
+                            e.preventDefault();
+                            removeCustomTopic(e.target.closest('.sb-remove-topic').getAttribute('data-topic'));
+                            return;
+                        }
+                        if (e.target.closest && e.target.closest('#sbAddTopicBtn')) {
+                            e.preventDefault();
+                            var input = getElement('#sbAddTopic');
+                            addCustomTopic(input && input.value);
+                            if (input) {
+                                input.value = '';
+                            }
+                        }
+                    });
+                    form.addEventListener('keydown', function (e) {
+                        if (e.key !== 'Enter') {
+                            return;
+                        }
+                        if (e.target && e.target.id === 'sbAddTopic') {
+                            e.preventDefault();
+                            addCustomTopic(e.target.value);
+                            e.target.value = '';
+                        }
+                    });
                 }
             })();
         </script>

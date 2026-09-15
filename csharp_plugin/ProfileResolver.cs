@@ -19,7 +19,7 @@ public class ProfileResolver
     /// Resolution order:
     ///   1. Explicit ProfileOverride stored in plugin config for this user
     ///   2. Auto-resolved from stored Birthday + Sex
-    ///   3. Plugin's DefaultProfile setting
+    ///   3. Unfiltered adult path
     /// </summary>
     public string ResolveProfile(UserDto user, BranchManifest manifest)
     {
@@ -43,7 +43,46 @@ public class ProfileResolver
         }
 
         // 3. Fall back to the plugin's default profile
-        return SelectAvailableProfile(manifest.Profiles, config?.DefaultProfile);
+        return SelectAvailableProfile(manifest.Profiles, "adult");
+    }
+
+    /// <summary>
+    /// Topics this Jellyfin user wants avoided. Empty means fall back to baked BVF profiles.
+    /// </summary>
+    public IReadOnlyList<string> GetAvoidedTopics(UserDto user)
+    {
+        var config = Plugin.Instance?.Configuration;
+        if (config == null || user == null)
+            return Array.Empty<string>();
+
+        if (!config.TryGetUserProfile(user.Id.ToString(), out var stored) || stored.Topics == null)
+            return Array.Empty<string>();
+
+        var topics = TopicPlayback.NormalizeTopics(stored.Topics);
+        if (topics.Count == 0)
+            return Array.Empty<string>();
+
+        var ordered = new List<string>(topics);
+        ordered.Sort(StringComparer.OrdinalIgnoreCase);
+        return ordered;
+    }
+
+    /// <summary>
+    /// Skip vs swap when an avoided label hits. Falls back to plugin DefaultAction,
+    /// then skip. Swap still needs a filler clip in the BVF.
+    /// </summary>
+    public string GetHitAction(UserDto user)
+    {
+        var config = Plugin.Instance?.Configuration;
+        if (config != null &&
+            user != null &&
+            config.TryGetUserProfile(user.Id.ToString(), out var stored) &&
+            !string.IsNullOrWhiteSpace(stored.HitAction))
+        {
+            return TopicPlayback.NormalizeHitAction(stored.HitAction);
+        }
+
+        return TopicPlayback.NormalizeHitAction(config?.DefaultAction);
     }
 
     private static string SelectAvailableProfile(Dictionary<string, UserProfile> profiles, string? preferred)

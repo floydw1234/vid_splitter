@@ -44,10 +44,12 @@ public sealed class BvfHlsController : ControllerBase
             return NotFound();
 
         var timeline = TryGetTimeline(bvfPath, profileKey, segments);
-        var playlist = BvfHlsPlaylistBuilder.Build(
-            segments,
-            BuildQuerySuffix(),
-            timeline?.SegmentDurationsSeconds);
+        if (timeline != null)
+            _segmentServer.WarmHlsFragmentCache(bvfPath, segments, timeline);
+
+        var playlist = timeline != null
+            ? BvfHlsPlaylistBuilder.BuildFromTimeline(timeline, BuildQuerySuffix())
+            : BvfHlsPlaylistBuilder.Build(segments, BuildQuerySuffix());
         return Content(playlist, PlaylistContentType);
     }
 
@@ -88,22 +90,7 @@ public sealed class BvfHlsController : ControllerBase
         if (index < 0 || timeline == null || index >= timeline.Parts.Count)
             return NotFound();
 
-        var part = timeline.Parts[index];
-        if (part.ResolvedIndex < 0 || part.ResolvedIndex >= segments.Count)
-            return NotFound();
-
-        var payload = BvfSegmentExtractor.ReadSegmentPayload(bvfPath, segments[part.ResolvedIndex]);
-        var media = Slice(payload, part.PayloadStart, part.PayloadLength);
-
-        Fmp4TimestampRewriter.ApplyTimestampOffset(
-            media,
-            timeline.Tracks,
-            part.TimestampOffsetTicks,
-            timeline.VideoTimescale);
-        Fmp4TimestampRewriter.SetMovieFragmentSequence(media, (uint)(index + 1));
-        if (part.ClampAudio)
-            Fmp4TimestampRewriter.ClampAudioToVideoDuration(media, timeline.Tracks);
-
+        var media = _segmentServer.GetHlsMediaFragment(bvfPath, segments, timeline, index);
         return File(media, SegmentContentType);
     }
 

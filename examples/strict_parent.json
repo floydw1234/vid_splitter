@@ -1,14 +1,14 @@
 {
   "name": "strict_parent",
-  "description": "Skip profanity, ideology, and mature content",
+  "description": "Filter keys this profile cares about. --replace-mode skip|swap sets the action for every key.",
   "filters": {
     "profanity": "skip",
     "feminism": "skip",
     "religion_christianity": "skip",
     "politics": "skip",
     "nudity": "swap",
-    "violence": "blur",
+    "violence": "skip",
     "drugs": "skip",
-    "alcohol": "mute"
+    "alcohol": "skip"
   }
 }
