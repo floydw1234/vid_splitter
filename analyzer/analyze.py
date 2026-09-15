@@ -151,6 +151,7 @@ class MovieAnalyzer:
         visual_topic_scanner=None,
         visual_topic_threshold: float = DEFAULT_VISUAL_THRESHOLD,
         visual_scan_interval: float = DEFAULT_VISUAL_SCAN_INTERVAL,
+        clip_gated_inset_black: bool = True,
         filter_topics: tuple[str, ...] = (),
     ):
         self.video_path = Path(video_path).resolve()
@@ -194,6 +195,7 @@ class MovieAnalyzer:
         self._visual_topic_scanner = visual_topic_scanner
         self.visual_topic_threshold = float(visual_topic_threshold)
         self.visual_scan_interval = float(visual_scan_interval)
+        self.clip_gated_inset_black = bool(clip_gated_inset_black)
         self.filter_topics = tuple(part.strip() for part in filter_topics if str(part).strip())
         self._scanned_frames: list[dict] = []
         self._visual_topic_frames: list[dict] = []
@@ -1505,6 +1507,7 @@ class MovieAnalyzer:
                     device=getattr(self, "_device", "cpu"),
                     threshold=self.visual_topic_threshold,
                     taxonomy=taxonomy_with_extras(self.filter_topics, dict(VISUAL_PROMPTS)),
+                    gated_inset_black=self.clip_gated_inset_black,
                 )
                 logger.info(
                     "Visual topics: CLIP + Faster R-CNN person crops (see output/vision_bakeoff/)"
@@ -2231,6 +2234,11 @@ def main():
         help="Seconds between CLIP appearance/topic frames (default: 1.0; NSFW broad pass stays at --scan-interval)",
     )
     parser.add_argument(
+        "--no-gated-inset-black",
+        action="store_true",
+        help="Disable gated inset pass that adds black people from small person crops (primary pass unchanged)",
+    )
+    parser.add_argument(
         "--wan-max-run",
         type=float,
         default=DEFAULT_WAN_MAX_RUN_S,
@@ -2326,6 +2334,7 @@ def main():
         topic_backend=args.topic_backend,
         visual_topics=not args.no_visual_topics,
         visual_scan_interval=args.visual_scan_interval,
+        clip_gated_inset_black=not args.no_gated_inset_black,
         filter_topics=filter_topics,
     )
 
