@@ -12,6 +12,8 @@ Architecture:
 Usage:
   python analyze.py "path/to/movie.mp4" [--model base|tiny|medium] [--threshold 0.75]
 """
+from __future__ import annotations
+
 import os
 import sys
 import argparse
@@ -25,8 +27,36 @@ from bisect import bisect_left
 from pathlib import Path
 from datetime import datetime, timezone
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
-import numpy as np
+_numpy = None
+
+
+def _import_numpy():
+    global _numpy, np
+    if _numpy is not None:
+        return _numpy
+    import numpy
+
+    _numpy = numpy
+    np = numpy
+    return _numpy
+
+
+class _NumpyProxy:
+    def __getattr__(self, name):
+        return getattr(_import_numpy(), name)
+
+
+np = _NumpyProxy()
+
+
+class _PILImageProxy:
+    def __getattr__(self, name):
+        from PIL import Image as _Image
+
+        return getattr(_Image, name)
+
+
+Image = _PILImageProxy()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -804,6 +834,8 @@ class MovieAnalyzer:
         rows = int(np.ceil(len(ranked) / columns))
         canvas_width = gutter + columns * (thumb_width + gutter)
         canvas_height = header_height + gutter + rows * (thumb_height + label_height + gutter)
+        from PIL import ImageDraw
+
         canvas = Image.new("RGB", (canvas_width, canvas_height), color=background)
         draw = ImageDraw.Draw(canvas)
         draw.text(
@@ -820,6 +852,8 @@ class MovieAnalyzer:
             frame_path = Path(result["frame_path"])
             try:
                 image = Image.open(frame_path).convert("RGB")
+                from PIL import ImageOps
+
                 preview = ImageOps.contain(image, (thumb_width, thumb_height))
             except Exception:
                 preview = Image.new("RGB", (thumb_width, thumb_height), color=(45, 45, 45))
@@ -896,6 +930,8 @@ class MovieAnalyzer:
             and mean_luma <= DARK_FRAME_LUMA_THRESHOLD
         ):
             rescue_applied = True
+            from PIL import ImageEnhance
+
             boosted_image = ImageEnhance.Contrast(
                 ImageEnhance.Brightness(image).enhance(BRIGHTNESS_RESCUE_GAIN)
             ).enhance(CONTRAST_RESCUE_GAIN)
@@ -960,6 +996,8 @@ class MovieAnalyzer:
     @staticmethod
     def _mean_luma(image: Image.Image) -> float:
         """Return average frame brightness on a 0-255 grayscale scale."""
+        from PIL import ImageOps
+
         grayscale = ImageOps.grayscale(image)
         return float(np.asarray(grayscale, dtype=np.float32).mean())
 
