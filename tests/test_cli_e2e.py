@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import uuid
@@ -14,8 +15,29 @@ from vid_splitter.bvf_muxer import BvfMuxer
 
 
 
-def _run(cmd: list[str], cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=True)
+def _subprocess_env(tmp_path: Path | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in ("JELLYFIN_BASE_URL", "JELLYFIN_API_KEY", "JELLYFIN_PLUGIN_DIR"):
+        env.pop(key, None)
+    base = tmp_path if tmp_path is not None else ROOT
+    env["JELLYFIN_PLUGIN_CONFIG"] = str(base / "__missing_jellyfin_plugin.xml")
+    return env
+
+
+def _run(
+    cmd: list[str],
+    cwd: Path = ROOT,
+    *,
+    tmp_path: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+        env=_subprocess_env(tmp_path),
+    )
 
 
 def _create_demo_video(path: Path, duration: int, frequency: int) -> None:
@@ -166,7 +188,7 @@ def test_analyze_bvf_and_resolve_from_user_json(tmp_path: Path):
     analyze = _run([
         sys.executable, "analyzer/analyze.py", str(video),
         "--demo-branch", "--output-dir", str(tmp_path),
-    ])
+    ], tmp_path=tmp_path)
     assert "BVF:" in analyze.stdout
 
     bvf = tmp_path / "demo.bvf"
@@ -213,7 +235,7 @@ def test_demo_branch_can_swap_to_embedded_filler_media(tmp_path: Path):
         "--demo-branch",
         "--demo-filler-video", str(filler),
         "--output-dir", str(tmp_path),
-    ])
+    ], tmp_path=tmp_path)
     assert "BVF:" in analyze.stdout
 
     bvf = tmp_path / "demo.bvf"
@@ -461,7 +483,7 @@ def test_demo_branch_bvf_passes_keyframe_validation(tmp_path: Path):
         "--demo-branch",
         "--output-dir",
         str(tmp_path),
-    ])
+    ], tmp_path=tmp_path)
     assert "BVF:" in analyze.stdout
 
     bvf = tmp_path / "demo.bvf"
@@ -499,7 +521,7 @@ def test_demo_branch_snaps_non_gop_aligned_boundaries_to_keyframes(tmp_path: Pat
         "--demo-branch",
         "--output-dir",
         str(tmp_path),
-    ])
+    ], tmp_path=tmp_path)
     assert "BVF:" in analyze.stdout
 
     bvf = tmp_path / "odd_duration.bvf"

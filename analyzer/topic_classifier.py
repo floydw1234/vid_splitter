@@ -14,9 +14,13 @@ import os
 import re
 from typing import List, Dict
 
-import httpx
-
 logger = logging.getLogger(__name__)
+
+
+def _httpx_client(timeout: float):
+    import httpx
+
+    return httpx.Client(timeout=timeout)
 
 # Topic labels are intentionally lightweight heuristics.
 # Default topic taxonomy - extend as needed
@@ -198,7 +202,7 @@ class LLMTopicClassifier:
         self.api_url = api_url.rstrip("/")
         self.model = model
         self.topics = topics or TOPIC_TAXONOMY
-        self.client = httpx.Client(timeout=120.0)
+        self.client = _httpx_client(120.0)
         logger.info(f"LLM Topic Classifier initialized: {self.api_url} ({self.model})")
 
     def classify_segment(
@@ -433,7 +437,7 @@ class EmbedTopicClassifier:
         self.model = model
         self.topics = topics or TOPIC_TAXONOMY
         self.margin = float(margin)
-        self.client = client or httpx.Client(timeout=180.0)
+        self.client = client or _httpx_client(180.0)
         self._label_names: list[str] | None = None
         self._label_vectors: list[list[float]] | None = None
         self._none_vector: list[float] | None = None

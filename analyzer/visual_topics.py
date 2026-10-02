@@ -19,9 +19,17 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from PIL import Image
-
 from analyzer.topic_classifier import TOPIC_TAXONOMY
+
+
+class _PILImageProxy:
+    def __getattr__(self, name):
+        from PIL import Image as _Image
+
+        return getattr(_Image, name)
+
+
+Image = _PILImageProxy()
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +147,7 @@ MIN_PERSON_CROP_AREA_RATIO: dict[str, float] = {
     "lgbtq": 0.18,
 }
 
-PersonBoxes = Callable[[Image.Image], list[tuple[float, float, float, float]]]
+PersonBoxes = Callable[[Any], list[tuple[float, float, float, float]]]
 
 
 def strict_visual_groups(

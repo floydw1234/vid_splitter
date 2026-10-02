@@ -12,9 +12,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
-
 logger = logging.getLogger(__name__)
+
+
+class _PILImageProxy:
+    def __getattr__(self, name):
+        from PIL import Image as _Image
+
+        return getattr(_Image, name)
+
+
+Image = _PILImageProxy()
 
 DEFAULT_CLEF_HF_REPO = "Cloudflare/clef-flash"
 DEFAULT_CLEF_MANUAL_SNAPSHOT = (
