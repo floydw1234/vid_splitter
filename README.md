@@ -20,6 +20,8 @@ ffmpeg -y \
 
 Analyze it into the custom BVF file. `--demo-branch` is a lightweight deterministic path for local verification: it marks the middle third as mature and embeds playable fMP4/CMAF media assets without loading Whisper/Safety Checker.
 
+Full analysis runs transcript topic classification (MiniLM by default) and **visual avoid-topic detection** (default: [Cloudflare clef-flash](https://huggingface.co/Cloudflare/clef-flash) on one full frame every **2 s** for `asian people`, `black people`, and `lgbtq`; other visual labels fall back to CLIP + Faster R-CNN person crops). Expect roughly **~1.4 s/frame**, **~20 GB GPU memory** (bf16), and **~2 min** model load on a GB10-class GPU. Opt into the prior CLIP-only stack with `--visual-backend clip` (and `--visual-scan-interval`, `--no-gated-inset-black` as before). Override the clef snapshot with `--clef-model PATH_OR_HF_ID` or `VID_SPLITTER_CLEF_MODEL`; tune detection with `--clef-threshold` (default 0.5).
+
 ```bash
 python3 analyzer/analyze.py /tmp/bvf-demo/demo.mp4 --demo-branch --output-dir /tmp/bvf-demo
 ```
