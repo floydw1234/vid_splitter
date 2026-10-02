@@ -4,10 +4,13 @@ Topic ID is CLIP, not SAM2. SAM2 only masks regions later for Wan Animate.
 Transcript LLM covers spoken topics. Appearance labels (Black / East Asian
 people) are scored on Faster R-CNN person crops so a white presenter does not
 drown out a child in their arms. Tiny satellite crops (split-screen insets,
-duplicate presenters) are dropped so they do not steal the appearance label.
+duplicate presenters) are dropped from the primary pass so they do not steal
+the appearance label; a second gated inset pass can still add ``black people``
+for small insets that the primary filter would miss (Ms Rachel bakeoff).
 
-LocateAnything was evaluated separately; CLIP + person crops won on Ms Rachel
-stills — see output/vision_bakeoff/.
+Qwen2.5-VL / other VLMs were evaluated offline only and are not wired into
+this production path. Bakeoff winner: CLIP + Faster R-CNN person crops with
+gated black insets — see output/vision_bakeoff/.
 """
 
 from __future__ import annotations
@@ -112,6 +115,9 @@ DEFAULT_APPEARANCE_THRESHOLD = 0.50
 DEFAULT_EXTRA_THRESHOLD = 0.70
 # Drop person boxes smaller than this fraction of the largest box in the frame.
 DEFAULT_MIN_PERSON_AREA_RATIO = 0.50
+# Gated inset pass: allow smaller crops to contribute black people only.
+DEFAULT_GATED_INSET_BLACK_ENABLED = True
+DEFAULT_GATED_INSET_MIN_AREA_RATIO = 0.10
 # Only score child appearance prompts on smaller person crops (not the presenter).
 APPEARANCE_CHILD_MAX_AREA_RATIO = 0.65
 
@@ -164,6 +170,25 @@ def keep_primary_person_crops(
         (crop, area)
         for crop, area in crops_with_area
         if area >= min_ratio * max_area
+    ]
+
+
+def gated_inset_person_crops(
+    crops_with_area: list[tuple[Image.Image, float]],
+    *,
+    primary_min_ratio: float = DEFAULT_MIN_PERSON_AREA_RATIO,
+    inset_min_ratio: float = DEFAULT_GATED_INSET_MIN_AREA_RATIO,
+) -> list[tuple[Image.Image, float]]:
+    """Return inset crops too small for primary scoring but eligible for gated black."""
+    if not crops_with_area:
+        return []
+    max_area = max(area for _crop, area in crops_with_area)
+    primary_cutoff = primary_min_ratio * max_area
+    inset_cutoff = inset_min_ratio * max_area
+    return [
+        (crop, area)
+        for crop, area in crops_with_area
+        if inset_cutoff <= area < primary_cutoff
     ]
 
 
@@ -221,6 +246,8 @@ class ClipTopicScanner:
         appearance_threshold: float = DEFAULT_APPEARANCE_THRESHOLD,
         extra_threshold: float = DEFAULT_EXTRA_THRESHOLD,
         min_person_area_ratio: float = DEFAULT_MIN_PERSON_AREA_RATIO,
+        gated_inset_black: bool = DEFAULT_GATED_INSET_BLACK_ENABLED,
+        gated_inset_min_area_ratio: float = DEFAULT_GATED_INSET_MIN_AREA_RATIO,
     ):
         self.device = device
         self.threshold = float(threshold)
@@ -230,6 +257,8 @@ class ClipTopicScanner:
         self.appearance_threshold = float(appearance_threshold)
         self.extra_threshold = float(extra_threshold)
         self.min_person_area_ratio = float(min_person_area_ratio)
+        self.gated_inset_black = bool(gated_inset_black)
+        self.gated_inset_min_area_ratio = float(gated_inset_min_area_ratio)
         self._person_boxes = person_boxes
         self._model = None
         self._processor = None
@@ -468,6 +497,12 @@ class ClipTopicScanner:
     def _appearance_hits(self, image: Image.Image) -> list[str]:
         if not self._appearance_keys:
             return []
+        hits: set[str] = set()
+        hits.update(self._primary_appearance_hits(image))
+        hits.update(self._gated_black_inset_hits(image))
+        return sorted(hits)
+
+    def _primary_appearance_hits(self, image: Image.Image) -> list[str]:
         crops_with_area = self._person_crops_for_scoring(image)
         if not crops_with_area:
             return []
@@ -486,6 +521,39 @@ class ClipTopicScanner:
                 if winner in wanted:
                     hits.add(wanted[winner])
         return sorted(hits)
+
+    def _gated_black_inset_hits(self, image: Image.Image) -> list[str]:
+        if not self.gated_inset_black:
+            return []
+        black_label = next(
+            (key for key, cls in self._appearance_keys.items() if cls == "black"),
+            None,
+        )
+        if not black_label:
+            return []
+        all_crops = self._person_crops_for_scoring(image, primary_only=False)
+        if not all_crops:
+            return []
+        inset_crops = gated_inset_person_crops(
+            all_crops,
+            primary_min_ratio=self.min_person_area_ratio,
+            inset_min_ratio=self.gated_inset_min_area_ratio,
+        )
+        if not inset_crops:
+            return []
+        inset_crops.sort(key=lambda item: item[1], reverse=True)
+        largest = max(area for _crop, area in all_crops)
+        for crop, area in inset_crops:
+            groups = [APPEARANCE_ADULT_PROMPTS]
+            if area <= APPEARANCE_CHILD_MAX_AREA_RATIO * largest:
+                groups.append(APPEARANCE_CHILD_PROMPTS)
+            for group in groups:
+                classes = list(group)
+                texts = [group[name] for name in classes]
+                winner = self._argmax_class(crop, classes, texts)
+                if winner == "black":
+                    return [black_label]
+        return []
 
     def _argmax_class(
         self,
