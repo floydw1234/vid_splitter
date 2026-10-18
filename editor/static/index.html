@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>vid_splitter Editor</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23121214'/%3E%3Cpath d='M8 10h4v12H8zm12 0h4v12h-4zM14 14h4v4h-4z' fill='%234a9eff'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <strong>vid_splitter</strong>
+    <span id="projectTitle">No project</span>
+    <button id="exportBtn" class="primary" disabled>Export</button>
+    <span id="exportSummary" class="muted"></span>
+    <p id="exportWarn" class="hidden" style="margin:0;font-size:0.85rem;color:#f0ad4e"></p>
+    <div class="progress" style="width:120px"><div id="exportProgress"></div></div>
+    <a id="exportLink" class="hidden" href="#">Download export</a>
+  </header>
+  <main>
+    <aside>
+      <h3>Projects</h3>
+      <ul id="projectList" class="row-list"></ul>
+      <h3>Media library</h3>
+      <ul id="mediaList" class="row-list"></ul>
+      <label class="upload-label">Upload video<input type="file" id="uploadInput" accept="video/*" /></label>
+      <section class="panel detection-panel">
+        <h3>Detection</h3>
+        <p class="model-note muted">Model: clef-flash on spark (~2 min first load).</p>
+        <div class="detection-form">
+          <fieldset class="topic-group">
+            <legend>Topics</legend>
+            <label class="check-row"><input type="checkbox" class="topic" value="asian people" checked /> asian people</label>
+            <label class="check-row"><input type="checkbox" class="topic" value="black people" checked /> black people</label>
+            <label class="check-row"><input type="checkbox" class="topic" value="lgbtq" checked /> lgbtq</label>
+          </fieldset>
+          <label class="field">Threshold <input type="number" id="detThreshold" value="0.5" step="0.05" min="0" max="1" /></label>
+          <label class="field">Interval (s) <input type="number" id="detInterval" value="2" step="0.5" min="0.5" /></label>
+          <button id="detectBtn" disabled type="button">Run detection</button>
+          <div class="progress"><div id="detectProgress"></div></div>
+          <p id="detectMsg" class="muted"></p>
+        </div>
+      </section>
+    </aside>
+    <div class="center">
+      <div class="video-wrap">
+        <video id="mainVideo" playsinline></video>
+        <video id="replVideo" playsinline class="hidden"></video>
+        <div id="blackOverlay"></div>
+        <div id="replaceOverlay">Replacement preview</div>
+      </div>
+      <div class="controls">
+        <button id="playBtn">Play</button>
+        <span id="timeDisplay">0:00 / 0:00</span>
+      </div>
+      <div class="timeline-area">
+        <div class="timeline-toolbar">
+          <button id="addSegBtn" disabled>Add segment</button>
+          <label>Zoom <input type="range" id="zoomSlider" min="1" max="20" value="5" /></label>
+        </div>
+        <div class="timeline-scroll" id="timelineScroll">
+          <div class="timeline-inner" id="timelineInner">
+            <div id="timeRuler"></div>
+            <div id="filmstrip"></div>
+            <div id="timelineCanvas"></div>
+            <div class="playhead" id="playhead" aria-hidden="true"></div>
+            <div class="playhead-handle" id="playheadHandle" title="Drag to scrub" aria-label="Playhead"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="side-panel">
+      <section class="panel">
+        <h3>All segments</h3>
+        <button type="button" id="acceptAllBtn">Accept all suggestions (blur)</button>
+        <button type="button" id="clearSuggBtn">Clear suggestions</button>
+        <ul id="segmentList" class="segment-list"></ul>
+      </section>
+      <h3>Segment</h3>
+      <div id="inspector" class="hidden">
+        <label class="field">Topic <input id="segTopic" /></label>
+        <label class="field">Start <input type="number" id="segStart" step="0.01" /></label>
+        <label class="field">End <input type="number" id="segEnd" step="0.01" /></label>
+        <label class="field">Score <input type="number" id="segScore" step="0.01" /></label>
+        <label class="field">Action
+          <select id="segAction">
+            <option value="none">none</option>
+            <option value="cut">cut</option>
+            <option value="blur">blur</option>
+            <option value="black">black</option>
+            <option value="mute">mute</option>
+            <option value="replace">replace</option>
+          </select>
+        </label>
+        <div id="replaceControls" class="replace-controls hidden">
+          <label class="field">Replacement
+            <select id="segReplacement"></select>
+          </label>
+          <label class="field">Upload replacement clip
+            <input type="file" id="replUpload" accept="video/*" />
+          </label>
+          <label class="field">Mode
+            <select id="segReplMode">
+              <option value="trim">trim</option>
+              <option value="loop">loop</option>
+            </select>
+          </label>
+          <button type="button" id="genReplBtn">Generate replacement (AI) — coming soon</button>
+          <p id="genReplMsg" class="muted"></p>
+        </div>
+        <button id="acceptSegBtn">Accept (A)</button>
+        <button id="deleteSegBtn">Delete</button>
+      </div>
+      <p id="noSelection">Select a segment on the timeline.</p>
+    </div>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

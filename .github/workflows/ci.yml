@@ -24,10 +24,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest zstandard
+          pip install pytest zstandard httpx -r editor/requirements.txt
 
       - name: Run tests
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          python -m pytest tests/test_bvf_muxer.py tests/test_bvf_player.py tests/test_cli_e2e.py -v
+          python -m pytest tests/test_bvf_muxer.py tests/test_bvf_player.py tests/test_cli_e2e.py tests/test_editor_*.py -v
