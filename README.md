@@ -151,3 +151,36 @@ local media fixtures plus `ffmpeg` / `ffprobe`:
 ```bash
 RUN_REAL_ANALYZER_TESTS=1 env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_real_video_integration.py -rs
 ```
+
+## Web editor (clean version MVP)
+
+A browser-based video editor lives under `editor/`. It supports project creation (upload or media library), clef-flash topic detection (or a fake detector for dev/tests), segment editing with actions (cut, blur, black, mute, replace), filmstrip thumbnails, ffmpeg export, and a stub AI replacement hook.
+
+Install the web dependencies (FastAPI, uvicorn, python-multipart). Real clef-flash detection additionally needs the analyzer's ML stack (**transformers ≥ 5.10**, **torch** with CUDA) in the same environment; on spark the repo's `.venv` already has it:
+
+```bash
+pip install -r editor/requirements.txt
+```
+
+Run the server from that environment, then open `http://<host>:8090/`:
+
+```bash
+.venv/bin/python -m editor.app --host 0.0.0.0 --port 8090 --media-dir videos
+```
+
+Defaults: project data under `~/.vid_splitter_editor` (override with `VID_EDITOR_DATA` or `--data-dir`), media library under `./videos` (`VID_EDITOR_MEDIA` / `--media-dir`). Per-project layout on disk:
+
+- `projects/<id>/project.json` — segment list, revision, metadata
+- `projects/<id>/thumbs/` — filmstrip JPEGs
+- `projects/<id>/replacements/` — uploaded replacement clips
+- `projects/<id>/exports/` — rendered export MP4s
+
+**Detection:** real clef-flash inference needs a GPU with roughly **~20 GB** VRAM and will fail in memory-capped sandboxes or CI. For UI work without loading the model, use `--fake-detector` or `VID_EDITOR_FAKE_DETECTOR=1`. AI segment replacement is not implemented; the API returns HTTP 501 with detail text and documents the `editor.generate.generate_replacement` hook.
+
+**Keyboard shortcuts** (when focus is not in a text field): **Space** play/pause; **← / →** seek ±1 s (**Shift** ±5 s); **A** accept selected segment; **Delete / Backspace** delete selected segment.
+
+Editor tests (no GPU):
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 VID_EDITOR_FAKE_DETECTOR=1 python -m pytest tests/test_editor_*.py -q
+```
