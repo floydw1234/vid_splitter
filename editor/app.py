@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Iterator
@@ -20,6 +21,7 @@ from starlette.requests import Request
 
 from editor.detect import DEFAULT_INTERVAL, DEFAULT_THRESHOLD, DEFAULT_TOPICS, run_detection
 from editor.export import run_export_with_progress
+from editor.generate import generate_replacement, gpu_lock, validate_generate_inputs
 from editor.ffmpeg_util import ffmpeg_available, probe_video
 from editor.jobs import JobRegistry
 from editor.project import (
@@ -38,6 +40,7 @@ from editor.project import (
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm"}
+REF_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 RANGE_CHUNK = 1024 * 1024
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -130,6 +133,14 @@ class SegmentBody(BaseModel):
     action: str = "none"
     replacement_clip: str | None = None
     replacement_mode: str = "trim"
+
+
+class GenerateReplacementBody(BaseModel):
+    points: list[list[float]] = Field(default_factory=list)
+    ref_image: str | None = None
+    prompt: str | None = None
+    seed: int | None = None
+    resolution: str = "480p"
 
 
 class SegmentPatch(BaseModel):
@@ -449,17 +460,96 @@ def create_app(data_dir: Path, media_dir: Path) -> FastAPI:
             raise HTTPException(status_code=404, detail="clip not found")
         return _ranged_file_response(path, request, _video_media_type(path))
 
-    @app.post("/api/projects/{project_id}/segments/{segment_id}/generate-replacement")
-    def generate_replacement_stub(project_id: str, segment_id: str) -> JSONResponse:
+    @app.post("/api/projects/{project_id}/ref-images")
+    async def upload_ref_image(
+        project_id: str, file: UploadFile = File(...)
+    ) -> dict[str, str]:
         load_project(data_dir, project_id)
-        return JSONResponse(
-            status_code=501,
-            content={
-                "status": "not_implemented",
-                "detail": "AI replacement generation is not available in this MVP.",
-                "hook": "editor.generate.generate_replacement",
-            },
-        )
+        safe = _safe_basename(file.filename or "ref.png")
+        ext = Path(safe).suffix.lower()
+        if ext not in REF_IMAGE_EXTS:
+            raise HTTPException(status_code=400, detail="ref image must be jpg or png")
+        refs_dir = project_dir(data_dir, project_id) / "refs"
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        dest = refs_dir / safe
+        with dest.open("wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                out.write(chunk)
+        return {"name": safe}
+
+    @app.post("/api/projects/{project_id}/segments/{segment_id}/generate-replacement")
+    def start_generate_replacement(
+        project_id: str, segment_id: str, body: GenerateReplacementBody
+    ) -> dict[str, str]:
+        project = load_project(data_dir, project_id)
+        segment = next((s for s in project.segments if s.id == segment_id), None)
+        if not segment:
+            raise HTTPException(status_code=404, detail="segment not found")
+        ref_path: Path | None = None
+        if body.ref_image:
+            safe = _safe_basename(body.ref_image)
+            ref_path = project_dir(data_dir, project_id) / "refs" / safe
+            if not ref_path.is_file():
+                raise HTTPException(status_code=404, detail="ref image not found")
+        try:
+            validate_generate_inputs(
+                project,
+                segment,
+                body.points,
+                ref_image_path=ref_path,
+                prompt=body.prompt,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        seed = int(body.seed if body.seed is not None else uuid.uuid4().int % (2**31))
+        job = jobs.create()
+
+        def work() -> None:
+            jobs.update(job.id, status="queued", message="waiting for GPU", stage="queued")
+            with gpu_lock():
+                try:
+                    jobs.update(job.id, status="running", message="starting", stage="start")
+
+                    def on_progress(stage: str, message: str, **kwargs: Any) -> None:
+                        jobs.update(
+                            job.id,
+                            message=message,
+                            stage=stage,
+                            elapsed=kwargs.get("elapsed"),
+                        )
+
+                    out_path = generate_replacement(
+                        data_dir,
+                        project,
+                        segment,
+                        points=body.points,
+                        ref_image_path=ref_path,
+                        prompt=body.prompt,
+                        seed=seed,
+                        progress_cb=on_progress,
+                    )
+                    jobs.update(
+                        job.id,
+                        status="done",
+                        progress=1.0,
+                        message="complete",
+                        stage="done",
+                        result={
+                            "replacement_clip": out_path.name,
+                            "segment_id": segment_id,
+                        },
+                    )
+                except Exception as exc:
+                    jobs.update(
+                        job.id,
+                        status="error",
+                        error=str(exc),
+                        message=str(exc),
+                        stage="error",
+                    )
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"job_id": job.id}
 
     @app.post("/api/projects/{project_id}/export")
     def start_export(project_id: str) -> dict[str, str]:
