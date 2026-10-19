@@ -633,13 +633,26 @@ async function applyLivePreview(t) {
 
 function bindVideo() {
   const v = $("mainVideo");
+  const updatePlayBtn = () => {
+    const btn = $("playBtn");
+    const paused = v.paused;
+    btn.textContent = paused ? "▶" : "⏸";
+    btn.setAttribute("aria-label", paused ? "Play" : "Pause");
+    btn.title = paused ? "Play" : "Pause";
+  };
   $("playBtn").onclick = () => (v.paused ? v.play() : v.pause());
   v.addEventListener("timeupdate", updatePlayhead);
   v.addEventListener("play", () => {
+    updatePlayBtn();
     const rv = $("replVideo");
     if (!rv.classList.contains("hidden")) rv.play().catch(() => {});
   });
-  v.addEventListener("pause", () => $("replVideo").pause());
+  v.addEventListener("pause", () => {
+    updatePlayBtn();
+    $("replVideo").pause();
+  });
+  v.addEventListener("ended", updatePlayBtn);
+  updatePlayBtn();
   requestAnimationFrame(function loop() {
     updatePlayhead();
     requestAnimationFrame(loop);
