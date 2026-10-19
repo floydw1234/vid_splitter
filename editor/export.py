@@ -16,6 +16,7 @@ class ReplacementInfo:
     path: Path
     has_audio: bool
     duration: float
+    audio_source: str = "clip"
 
 
 def segments_to_apply(project: Project) -> list[Segment]:
@@ -150,16 +151,19 @@ def build_filter_graph(
             )
             parts.append(v_chain)
             v_out = f"[v{idx}]"
-            if info.has_audio:
+            if info.audio_source == "original":
+                pass
+            elif info.has_audio:
                 parts.append(
                     f"[{inp}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
                     f"{trim_a},adelay={ms}:all=1[ra{idx}];"
                     f"{a_out}volume=volume=0:enable='{en}'[am{idx}];"
                     f"[am{idx}][ra{idx}]amix=inputs=2:duration=first:normalize=0[a{idx}]"
                 )
+                a_out = f"[a{idx}]"
             else:
                 parts.append(f"{a_out}volume=volume=0:enable='{en}'[a{idx}]")
-            a_out = f"[a{idx}]"
+                a_out = f"[a{idx}]"
 
     veff, aeff = v_out, a_out
     keep = complement_intervals(duration, cuts)
@@ -216,15 +220,22 @@ def _replacement_info_map(
         if entry:
             duration = float(entry.duration)
             has_audio = entry.has_audio
+            audio_source = entry.audio_source
         else:
             duration = 0.0
             has_audio = True
+            audio_source = "original" if name.startswith("gen_") else "clip"
         if duration <= 0.0:
             probed = probe_video(path)
             duration = float(probed["duration"])
             if entry is None:
                 has_audio = bool(probed["has_audio"])
-        out[name] = ReplacementInfo(path=path, has_audio=has_audio, duration=duration)
+        out[name] = ReplacementInfo(
+            path=path,
+            has_audio=has_audio,
+            duration=duration,
+            audio_source=audio_source,
+        )
     return out
 
 

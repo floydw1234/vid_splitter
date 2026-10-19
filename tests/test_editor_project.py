@@ -14,6 +14,47 @@ from editor.project import (
 )
 
 
+def test_replacement_entry_audio_source_round_trip():
+    entry = ReplacementEntry(
+        name="upload.mp4",
+        duration=2.0,
+        has_audio=True,
+        width=320,
+        height=180,
+        audio_source="clip",
+    )
+    d = entry.to_dict()
+    assert d["audio_source"] == "clip"
+    assert ReplacementEntry.from_dict(d).audio_source == "clip"
+
+
+def test_replacement_entry_gen_default_audio_source():
+    assert (
+        ReplacementEntry.from_dict(
+            {
+                "name": "gen_seg1_42.mp4",
+                "duration": 1.0,
+                "has_audio": False,
+                "width": 320,
+                "height": 180,
+            }
+        ).audio_source
+        == "original"
+    )
+    assert (
+        ReplacementEntry.from_dict(
+            {
+                "name": "upload.mp4",
+                "duration": 1.0,
+                "has_audio": True,
+                "width": 320,
+                "height": 180,
+            }
+        ).audio_source
+        == "clip"
+    )
+
+
 def test_replacement_metadata_round_trip(tmp_path):
     project = Project(
         id="r1",

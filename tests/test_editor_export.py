@@ -11,7 +11,7 @@ from editor.export import (
     expected_output_duration,
 )
 from editor.ffmpeg_util import ffmpeg_available, probe_video
-from editor.project import Project, Segment
+from editor.project import Project, ReplacementEntry, Segment
 
 
 def _project(**kwargs) -> Project:
@@ -107,6 +107,40 @@ def test_replace_short_clip_pads_before_trim():
     graph, _ = build_filter_graph(p, {"r.mp4": info})
     assert "tpad=stop_mode=clone:stop_duration=3" in graph
     assert "apad," in graph
+
+
+def test_replace_original_audio_passthrough():
+    repl = Path("/tmp/r.mp4")
+    p = _project(
+        replacement_clips=["gen_r.mp4"],
+        replacements=[
+            ReplacementEntry(
+                name="gen_r.mp4",
+                duration=3.0,
+                has_audio=False,
+                width=320,
+                height=180,
+                audio_source="original",
+            )
+        ],
+        segments=[
+            Segment(
+                id="r",
+                start=1.0,
+                end=2.0,
+                action="replace",
+                replacement_clip="gen_r.mp4",
+            )
+        ],
+    )
+    info = ReplacementInfo(
+        path=repl, has_audio=False, duration=3.0, audio_source="original"
+    )
+    graph, _ = build_filter_graph(p, {"gen_r.mp4": info})
+    assert "overlay=0:0" in graph
+    assert "[1:a]" not in graph
+    assert "amix" not in graph
+    assert "volume=volume=0:enable='between(t\\,1" not in graph
 
 
 def test_replace_no_replacement_audio_mutes_only():

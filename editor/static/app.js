@@ -6,6 +6,9 @@ const state = {
   pollTimer: null,
   filmstripTimer: null,
   previewInMuteSegment: false,
+  previewReplSegmentId: null,
+  previewReplClipAudio: false,
+  previewReplForceSeek: false,
   replClipDurations: {},
   drag: null,
   suppressSeekClick: false,
@@ -379,6 +382,7 @@ function seekFromClientX(clientX, scrollEl) {
   const rect = canvas.getBoundingClientRect();
   const x = clientX - rect.left + scrollEl.scrollLeft;
   $("mainVideo").currentTime = Math.max(0, Math.min(state.project.duration, x / pxPerSec()));
+  state.previewReplForceSeek = true;
 }
 
 function bindScrubArea(el) {
@@ -765,6 +769,25 @@ async function ensureReplDuration(name) {
   return 5;
 }
 
+function replacementAudioSource(name) {
+  const entry = state.project?.replacements?.find((r) => r.name === name);
+  if (entry?.audio_source) return entry.audio_source;
+  if (name.startsWith("gen_")) return "original";
+  return "clip";
+}
+
+function leaveReplacePreview(inMute) {
+  const rv = $("replVideo");
+  const v = $("mainVideo");
+  rv.pause();
+  rv.classList.add("hidden");
+  state.previewReplSegmentId = null;
+  if (state.previewReplClipAudio) {
+    state.previewReplClipAudio = false;
+    if (!inMute) v.muted = false;
+  }
+}
+
 async function applyLivePreview(t) {
   const v = $("mainVideo");
   const rv = $("replVideo");
@@ -782,8 +805,14 @@ async function applyLivePreview(t) {
   v.style.filter = "";
   $("blackOverlay").style.display = "none";
   $("replaceOverlay").style.display = "none";
-  rv.classList.add("hidden");
-  rv.pause();
+
+  const inReplClip =
+    visual?.action === "replace" && visual.replacement_clip
+      ? visual.id
+      : null;
+  if (!inReplClip && state.previewReplSegmentId) {
+    leaveReplacePreview(inMute);
+  }
 
   if (!visual) return;
 
@@ -795,12 +824,31 @@ async function applyLivePreview(t) {
     $("blackOverlay").style.display = "block";
   } else if (visual.action === "replace") {
     if (visual.replacement_clip) {
-      const url = `/api/projects/${state.project.id}/replacements/${encodeURIComponent(visual.replacement_clip)}`;
+      const clipName = visual.replacement_clip;
+      const entry = state.project?.replacements?.find((r) => r.name === clipName);
+      const audioSource = replacementAudioSource(clipName);
+      const clipHasAudio = entry?.has_audio !== false;
+      const useClipAudio = audioSource === "clip" && clipHasAudio;
+
+      if (inReplClip !== state.previewReplSegmentId) {
+        state.previewReplSegmentId = inReplClip;
+        state.previewReplForceSeek = true;
+        if (useClipAudio) {
+          state.previewReplClipAudio = true;
+          v.muted = true;
+        }
+      }
+
+      rv.muted = !useClipAudio;
+      if (useClipAudio) v.muted = true;
+
+      const url = `/api/projects/${state.project.id}/replacements/${encodeURIComponent(clipName)}`;
       if (rv.getAttribute("data-src") !== url) {
         rv.src = url;
         rv.setAttribute("data-src", url);
+        state.previewReplForceSeek = true;
       }
-      const clipDur = await ensureReplDuration(visual.replacement_clip);
+      const clipDur = await ensureReplDuration(clipName);
       const offset = t - visual.start;
       let ct = offset;
       if (visual.replacement_mode === "loop" && clipDur > 0) {
@@ -808,11 +856,19 @@ async function applyLivePreview(t) {
       } else {
         ct = Math.min(offset, clipDur);
       }
-      if (Math.abs(rv.currentTime - ct) > 0.15) rv.currentTime = ct;
+      const drift = state.previewReplForceSeek ? 0 : 0.3;
+      if (state.previewReplForceSeek || Math.abs(rv.currentTime - ct) > drift) {
+        rv.currentTime = ct;
+        state.previewReplForceSeek = false;
+      }
       rv.classList.remove("hidden");
-      if (v.paused) rv.pause();
-      else rv.play().catch(() => {});
+      if (v.paused) {
+        if (!rv.paused) rv.pause();
+      } else if (rv.paused) {
+        rv.play().catch(() => {});
+      }
     } else {
+      if (state.previewReplSegmentId) leaveReplacePreview(inMute);
       $("replaceOverlay").style.display = "flex";
     }
   }
@@ -1019,6 +1075,7 @@ document.addEventListener("keydown", (e) => {
       0,
       Math.min(state.project?.duration || 0, v.currentTime + (e.code === "ArrowRight" ? delta : -delta))
     );
+    state.previewReplForceSeek = true;
   }
 });
 

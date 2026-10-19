@@ -426,3 +426,61 @@ def test_generate_replacement_endpoint_returns_job_id(client, monkeypatch):
             break
         time.sleep(0.05)
     assert job["status"] == "done"
+
+
+@pytest.mark.skipif(not ffmpeg_available(), reason="ffmpeg required")
+def test_postprocess_to_project_spec_has_no_audio_stream(tmp_path):
+    import subprocess
+
+    from editor.ffmpeg_util import probe_video
+
+    source = tmp_path / "source.mp4"
+    raw = tmp_path / "raw.mp4"
+    dest = tmp_path / "out.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x180:rate=24:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x90:rate=24:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            str(raw),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    project = _sample_project()
+    segment = Segment(id="s1", start=0.0, end=1.0)
+    postprocess_to_project_spec(raw, dest, project, segment, source)
+    meta = probe_video(dest)
+    assert meta["has_audio"] is False

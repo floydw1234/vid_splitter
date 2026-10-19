@@ -18,6 +18,7 @@ SegmentSource = Literal["suggested", "manual"]
 SegmentStatus = Literal["suggested", "accepted"]
 SegmentAction = Literal["none", "cut", "blur", "black", "mute", "replace"]
 ReplacementMode = Literal["trim", "loop"]
+ReplacementAudioSource = Literal["original", "clip"]
 
 VALID_ACTIONS = frozenset({"none", "cut", "blur", "black", "mute", "replace"})
 VALID_SOURCES = frozenset({"suggested", "manual"})
@@ -32,18 +33,30 @@ class ReplacementEntry:
     has_audio: bool
     width: int
     height: int
+    audio_source: ReplacementAudioSource = "clip"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ReplacementEntry:
+        name = str(data["name"])
+        raw_source = data.get("audio_source")
+        if raw_source is None:
+            audio_source: ReplacementAudioSource = (
+                "original" if name.startswith("gen_") else "clip"
+            )
+        else:
+            audio_source = str(raw_source)
+            if audio_source not in ("original", "clip"):
+                audio_source = "clip"
         return cls(
-            name=str(data["name"]),
+            name=name,
             duration=float(data.get("duration") or 0.0),
             has_audio=bool(data.get("has_audio", True)),
             width=int(data.get("width") or 0),
             height=int(data.get("height") or 0),
+            audio_source=audio_source,
         )
 
 

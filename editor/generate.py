@@ -22,7 +22,7 @@ from editor.comfy import (
 )
 from editor.ffmpeg_util import probe_video
 from editor.project import Project, ReplacementEntry, Segment, load_project, project_dir, save_project
-from tools.wan_v2v import ANIMATE_FPS, DEFAULT_NEGATIVE, fit_size, mux_audio, trim_video
+from tools.wan_v2v import ANIMATE_FPS, DEFAULT_NEGATIVE, fit_size, trim_video
 
 MAX_SEGMENT_SECONDS = 10.0
 WAN_MAX_SIDE = 832
@@ -220,29 +220,6 @@ def wait_for_prompt(
         time.sleep(poll_interval)
 
 
-def _extract_segment_audio(source: Path, dest: Path, start: float, duration: float) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            f"{max(0.0, start):.3f}",
-            "-i",
-            str(source),
-            "-t",
-            f"{max(0.01, duration):.3f}",
-            "-vn",
-            "-c:a",
-            "aac",
-            str(dest),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
 def postprocess_to_project_spec(
     video_in: Path,
     dest: Path,
@@ -287,17 +264,7 @@ def postprocess_to_project_spec(
         capture_output=True,
         text=True,
     )
-    if project.has_audio:
-        work = dest.parent
-        audio_seg = work / f"_aud_{uuid.uuid4().hex[:8]}.m4a"
-        try:
-            _extract_segment_audio(source_video, audio_seg, segment.start, duration)
-            mux_audio(scaled, audio_seg, dest)
-        finally:
-            scaled.unlink(missing_ok=True)
-            audio_seg.unlink(missing_ok=True)
-    else:
-        scaled.replace(dest)
+    scaled.replace(dest)
 
 
 def _run_comfy_media_job(
@@ -420,9 +387,10 @@ def generate_replacement(
         entry = ReplacementEntry(
             name=out_name,
             duration=float(meta["duration"]),
-            has_audio=bool(meta["has_audio"]),
+            has_audio=False,
             width=int(meta["width"]),
             height=int(meta["height"]),
+            audio_source="original",
         )
         fresh = load_project(data_dir, project.id)
         fresh.replacements = [r for r in fresh.replacements if r.name != out_name]
