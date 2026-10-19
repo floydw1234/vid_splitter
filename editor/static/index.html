@@ -43,8 +43,9 @@
       </section>
     </aside>
     <div class="center">
-      <div class="video-wrap">
+      <div class="video-wrap" id="videoWrap">
         <video id="mainVideo" playsinline></video>
+        <canvas id="pickOverlay" class="pick-overlay hidden" aria-hidden="true"></canvas>
         <video id="replVideo" playsinline class="hidden"></video>
         <div id="blackOverlay"></div>
         <div id="replaceOverlay">Replacement preview</div>
@@ -105,9 +106,24 @@
               <option value="loop">loop</option>
             </select>
           </label>
-          <button type="button" id="genReplBtn">Generate replacement (AI) — coming soon</button>
-          <p id="genReplMsg" class="muted"></p>
         </div>
+        <section id="aiReplaceSection" class="ai-replace panel">
+          <h4>Replace character (AI)</h4>
+          <p class="muted small-note">~80 s per output second; max 10 s; one job at a time.</p>
+          <button type="button" id="pickPersonBtn">Pick person</button>
+          <button type="button" id="clearPointsBtn" disabled>Clear points</button>
+          <p id="pickHint" class="muted hidden">Click video: left = include (green), Shift/Alt/right = exclude (red).</p>
+          <label class="field">Reference image
+            <input type="file" id="refImageUpload" accept="image/jpeg,image/png" />
+          </label>
+          <p id="refImageName" class="muted"></p>
+          <label class="field">Or describe person (prompt)
+            <textarea id="aiPrompt" rows="2" placeholder="e.g. woman in blue jacket"></textarea>
+          </label>
+          <label class="field">Seed (optional) <input type="number" id="aiSeed" step="1" placeholder="random" /></label>
+          <button type="button" id="genReplBtn" class="primary">Generate</button>
+          <p id="genReplMsg" class="muted"></p>
+        </section>
         <button id="acceptSegBtn">Accept (A)</button>
         <button id="deleteSegBtn">Delete</button>
       </div>

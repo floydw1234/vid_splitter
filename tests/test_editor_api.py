@@ -150,16 +150,18 @@ def test_detection_job_reports_error(client, monkeypatch):
     assert "clef model load failure" in (job["error"] or job["message"])
 
 
-def test_generate_replacement_501(client):
+@pytest.mark.skipif(not ffmpeg_available(), reason="ffmpeg required")
+def test_generate_replacement_requires_body(client, monkeypatch):
     pid = client.post("/api/projects", json={"media": "sample.mp4"}).json()["id"]
     sid = client.post(
         f"/api/projects/{pid}/segments",
         json={"start": 0.0, "end": 1.0},
     ).json()["id"]
-    res = client.post(f"/api/projects/{pid}/segments/{sid}/generate-replacement")
-    assert res.status_code == 501
-    body = res.json()
-    assert body["hook"] == "editor.generate.generate_replacement"
+    res = client.post(
+        f"/api/projects/{pid}/segments/{sid}/generate-replacement",
+        json={"points": []},
+    )
+    assert res.status_code == 400
 
 
 @pytest.mark.skipif(not ffmpeg_available(), reason="ffmpeg required")

@@ -9,6 +9,11 @@ const state = {
   replClipDurations: {},
   drag: null,
   suppressSeekClick: false,
+  pickMode: false,
+  pickPoints: [],
+  refImageName: null,
+  genJobPoll: null,
+  genJobRunning: false,
 };
 
 const TOPIC_COLORS = {
@@ -444,6 +449,103 @@ function refreshInspector() {
   const replaceOn = seg.action === "replace";
   $("replaceControls").classList.toggle("hidden", !replaceOn);
   if (!replaceOn) $("genReplMsg").textContent = "";
+  drawPickOverlay();
+}
+
+function videoContentRect() {
+  const v = $("mainVideo");
+  const wrap = $("videoWrap");
+  if (!v.videoWidth || !wrap) return null;
+  const wr = wrap.getBoundingClientRect();
+  const vw = v.videoWidth;
+  const vh = v.videoHeight;
+  const scale = Math.min(wr.width / vw, wr.height / vh);
+  const dw = vw * scale;
+  const dh = vh * scale;
+  const left = wr.left + (wr.width - dw) / 2;
+  const top = wr.top + (wr.height - dh) / 2;
+  return { left, top, width: dw, height: dh, vw, vh };
+}
+
+function clientToNormalized(clientX, clientY) {
+  const r = videoContentRect();
+  if (!r) return null;
+  const x = (clientX - r.left) / r.width;
+  const y = (clientY - r.top) / r.height;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return [x, y];
+}
+
+function resizePickCanvas() {
+  const canvas = $("pickOverlay");
+  const wrap = $("videoWrap");
+  if (!canvas || !wrap) return;
+  const r = wrap.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.floor(r.width));
+  canvas.height = Math.max(1, Math.floor(r.height));
+  drawPickOverlay();
+}
+
+function drawPickOverlay() {
+  const canvas = $("pickOverlay");
+  if (!canvas || canvas.classList.contains("hidden")) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const wrap = $("videoWrap");
+  const wr = wrap.getBoundingClientRect();
+  const r = videoContentRect();
+  if (!r) return;
+  const ox = r.left - wr.left;
+  const oy = r.top - wr.top;
+  state.pickPoints.forEach((pt) => {
+    const cx = ox + pt[0] * r.width;
+    const cy = oy + pt[1] * r.height;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 7, 0, Math.PI * 2);
+    ctx.fillStyle = pt[2] === 1 ? "rgba(46, 204, 113, 0.85)" : "rgba(231, 76, 60, 0.85)";
+    ctx.fill();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  });
+}
+
+function setPickMode(on) {
+  state.pickMode = on;
+  const canvas = $("pickOverlay");
+  if (!canvas) return;
+  canvas.classList.toggle("hidden", !on);
+  $("pickHint").classList.toggle("hidden", !on);
+  $("pickPersonBtn").textContent = on ? "Done picking" : "Pick person";
+  if (on) {
+    resizePickCanvas();
+  } else {
+    drawPickOverlay();
+  }
+}
+
+function bindPickOverlay() {
+  const canvas = $("pickOverlay");
+  const v = $("mainVideo");
+  if (!canvas || !v) return;
+  window.addEventListener("resize", () => {
+    if (state.pickMode) resizePickCanvas();
+  });
+  canvas.addEventListener("click", (e) => {
+    if (!state.pickMode || !state.selectedId) return;
+    e.preventDefault();
+    const neg = e.shiftKey || e.altKey || e.button === 2;
+    const norm = clientToNormalized(e.clientX, e.clientY);
+    if (!norm) return;
+    state.pickPoints.push([norm[0], norm[1], neg ? 0 : 1]);
+    $("clearPointsBtn").disabled = state.pickPoints.length === 0;
+    drawPickOverlay();
+  });
+  canvas.addEventListener("contextmenu", (e) => {
+    if (!state.pickMode) return;
+    e.preventDefault();
+  });
 }
 
 function refreshReplacementSelect() {
@@ -524,22 +626,107 @@ function bindInspector() {
     debouncedSave();
   };
 
+  $("pickPersonBtn").onclick = () => {
+    const seg = state.project?.segments.find((s) => s.id === state.selectedId);
+    if (!seg) return;
+    const v = $("mainVideo");
+    if (!state.pickMode) {
+      v.currentTime = seg.start;
+      v.pause();
+      setPickMode(true);
+    } else {
+      setPickMode(false);
+    }
+  };
+  $("clearPointsBtn").onclick = () => {
+    state.pickPoints = [];
+    $("clearPointsBtn").disabled = true;
+    drawPickOverlay();
+  };
+  $("refImageUpload").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`/api/projects/${state.project.id}/ref-images`, { method: "POST", body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("refImageName").textContent = data.detail || `HTTP ${res.status}`;
+      return;
+    }
+    state.refImageName = data.name;
+    $("refImageName").textContent = data.name;
+  };
   $("genReplBtn").onclick = async () => {
-    if (!state.selectedId) return;
+    if (!state.selectedId || state.genJobRunning) return;
     $("genReplMsg").textContent = "";
+    const prompt = ($("aiPrompt").value || "").trim();
+    if (!state.refImageName && !prompt) {
+      $("genReplMsg").textContent = "Upload a reference image or enter a prompt.";
+      return;
+    }
+    if (!state.pickPoints.some((p) => p[2] === 1)) {
+      $("genReplMsg").textContent = "Add at least one positive point (Pick person).";
+      return;
+    }
+    const seedRaw = $("aiSeed").value;
+    const body = {
+      points: state.pickPoints,
+      prompt: prompt || undefined,
+      ref_image: state.refImageName || undefined,
+      resolution: "480p",
+    };
+    if (seedRaw !== "") body.seed = parseInt(seedRaw, 10);
+    state.genJobRunning = true;
+    $("genReplBtn").disabled = true;
     try {
       const res = await fetch(
         `/api/projects/${state.project.id}/segments/${state.selectedId}/generate-replacement`,
-        { method: "POST" }
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
       );
-      const body = await res.json().catch(() => ({}));
-      const detail = body.detail;
-      $("genReplMsg").textContent =
-        typeof detail === "string"
-          ? detail
-          : detail?.message || body.hook || body.message || `HTTP ${res.status}`;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        $("genReplMsg").textContent = typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`;
+        state.genJobRunning = false;
+        $("genReplBtn").disabled = false;
+        return;
+      }
+      const jobId = data.job_id;
+      const poll = async () => {
+        const job = await api(`/api/jobs/${jobId}`);
+        const elapsed = job.elapsed != null ? ` (${Math.round(job.elapsed)}s)` : "";
+        const stage = job.stage ? `${job.stage}: ` : "";
+        $("genReplMsg").textContent = `${stage}${job.message || job.status}${elapsed}`;
+        if (job.status === "done") {
+          clearInterval(state.genJobPoll);
+          state.genJobPoll = null;
+          state.genJobRunning = false;
+          $("genReplBtn").disabled = false;
+          state.project = await api(`/api/projects/${state.project.id}`);
+          refreshReplacementSelect();
+          refreshInspector();
+          renderTimeline();
+          refreshExportSummary();
+          return;
+        }
+        if (job.status === "error") {
+          clearInterval(state.genJobPoll);
+          state.genJobPoll = null;
+          state.genJobRunning = false;
+          $("genReplBtn").disabled = false;
+          $("genReplMsg").textContent = job.error || job.message || "Generation failed";
+        }
+      };
+      state.genJobPoll = setInterval(poll, 2000);
+      poll();
     } catch (e) {
       $("genReplMsg").textContent = String(e);
+      state.genJobRunning = false;
+      $("genReplBtn").disabled = false;
     }
   };
   $("replUpload").onchange = async (e) => {
@@ -836,6 +1023,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 bindInspector();
+bindPickOverlay();
 bindVideo();
 refreshProjects();
 refreshMedia();

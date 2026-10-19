@@ -16,6 +16,8 @@ class Job:
     status: JobStatus = "queued"
     progress: float = 0.0
     message: str = ""
+    stage: str = ""
+    elapsed: float | None = None
     result: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
@@ -43,6 +45,8 @@ class JobRegistry:
         status: JobStatus | None = None,
         progress: float | None = None,
         message: str | None = None,
+        stage: str | None = None,
+        elapsed: float | None = None,
         result: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> None:
@@ -56,6 +60,10 @@ class JobRegistry:
                 job.progress = max(0.0, min(1.0, progress))
             if message is not None:
                 job.message = message
+            if stage is not None:
+                job.stage = stage
+            if elapsed is not None:
+                job.elapsed = elapsed
             if result is not None:
                 job.result = result
             if error is not None:
@@ -108,6 +116,8 @@ class JobRegistry:
             "status": job.status,
             "progress": job.progress,
             "message": job.message,
+            "stage": job.stage,
+            "elapsed": job.elapsed,
             "result": job.result,
             "error": job.error,
         }
