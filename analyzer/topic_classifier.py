@@ -60,7 +60,7 @@ def taxonomy_with_extras(
 
 
 def visual_only_transcript_labels() -> frozenset[str]:
-    """Appearance tags are CLIP-only; never classify them from transcript embeddings."""
+    """Appearance tags are visual-only (clef-flash); never classify them from transcript embeddings."""
     from analyzer.visual_topics import APPEARANCE_LABELS
 
     return frozenset(APPEARANCE_LABELS)

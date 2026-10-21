@@ -5,8 +5,6 @@ import inspect
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock
-
 import pytest
 from PIL import Image
 
@@ -14,10 +12,9 @@ from analyzer.analyze import MovieAnalyzer
 from analyzer.clef_topics import (
     ClefFlashTopicScanner,
     DEFAULT_CLEF_SCAN_INTERVAL,
-    build_hybrid_visual_scanner,
-    partition_visual_labels,
+    build_clef_visual_scanner,
+    clef_active_labels,
 )
-from analyzer.visual_topics import VISUAL_PROMPTS
 
 
 @pytest.fixture
@@ -143,24 +140,11 @@ def test_import_clef_topics_does_not_import_torch():
     sys.modules.update(saved)
 
 
-def test_partition_visual_labels():
-    taxonomy = dict(VISUAL_PROMPTS)
-    clef, clip = partition_visual_labels(taxonomy)
-    assert clef == {"lgbtq"}
-    assert "nudity" in clip
-    assert "asian people" not in clip
-
-
-def test_partition_visual_labels_mixed_case_and_aliases():
-    taxonomy = {
-        "Black people": "x",
-        "Asian Person": "y",
-        "LGBTQ": "z",
-        "nudity": "n",
-    }
-    clef, clip = partition_visual_labels(taxonomy)
-    assert clef == {"Black people", "Asian Person", "LGBTQ"}
-    assert clip == {"nudity"}
+def test_clef_active_labels_default_and_filters():
+    assert clef_active_labels() == frozenset({"lgbtq"})
+    assert clef_active_labels(("nudity",)) == frozenset({"lgbtq"})
+    mixed = clef_active_labels(("Black people", "Asian Person", "LGBTQ", "nudity"))
+    assert mixed == frozenset({"Black people", "Asian Person", "LGBTQ", "lgbtq"})
 
 
 def test_clef_returns_original_taxonomy_keys(fake_joint_schema):
@@ -200,83 +184,40 @@ def test_clef_only_runs_requested_questions(fake_joint_schema, monkeypatch):
     assert encoded_qids == ["lgbtq"]
 
 
-def test_hybrid_clip_fallback_and_skip_log(caplog, monkeypatch, tmp_path: Path):
-    taxonomy = {"nudity": "x", "asian people": "y"}
-    clip_calls: list[dict] = []
-
-    def clip_factory(sub_taxonomy):
-        clip_calls.append(sub_taxonomy)
-        scanner = MagicMock()
-        scanner.topics_for_image.return_value = ["nudity"]
-        return scanner
-
-    with caplog.at_level("INFO"):
-        hybrid = build_hybrid_visual_scanner(
-            taxonomy=taxonomy,
-            device="cpu",
-            clef_model_path=str(tmp_path / "missing"),
-            clef_threshold=0.5,
-            clip_threshold=0.45,
-            clip_gated_inset_black=True,
-            clip_factory=clip_factory,
-        )
-    assert clip_calls == [{"nudity": "x"}]
-    assert "CLIP fallback [nudity]" in caplog.text
-    assert "clef-flash [asian people]" in caplog.text
-
-    monkeypatch.setattr(
-        ClefFlashTopicScanner,
-        "topics_for_image",
-        lambda self, image: ["asian people"],
+def test_nudity_only_filter_keeps_default_lgbtq_clef_labels(fake_joint_schema):
+    scanner = build_clef_visual_scanner(
+        filter_topics=("nudity",),
+        device="cpu",
+        clef_model_path=str(fake_joint_schema["snap"]),
+        clef_threshold=0.5,
     )
-    image = Image.new("RGB", (2, 2))
-    topics = hybrid.topics_for_image(image)
-    assert topics == ["asian people", "nudity"]
+    assert scanner.active_labels == frozenset({"lgbtq"})
+    assert "nudity" not in scanner.active_labels
 
 
-def test_hybrid_clip_unavailable_marks_skipped(caplog, tmp_path: Path):
-    taxonomy = {"nudity": "x", "lgbtq": "y"}
-
-    def broken_factory(sub_taxonomy):
-        raise RuntimeError("no clip")
-
+def test_build_clef_visual_scanner_logs_active(caplog, fake_joint_schema):
     with caplog.at_level("INFO"):
-        hybrid = build_hybrid_visual_scanner(
-            taxonomy=taxonomy,
+        build_clef_visual_scanner(
+            filter_topics=("asian people",),
             device="cpu",
-            clef_model_path=str(tmp_path),
+            clef_model_path=str(fake_joint_schema["snap"]),
             clef_threshold=0.5,
-            clip_threshold=0.45,
-            clip_gated_inset_black=True,
-            clip_factory=broken_factory,
         )
-    assert "skipped [nudity]" in caplog.text
-    assert hybrid._clip is None
+    assert "Visual topics (clef-flash): [asian people, lgbtq]" in caplog.text
 
 
-def test_analyzer_defaults_clef_backend_and_interval(tmp_path: Path):
+def test_analyzer_defaults_clef_interval(tmp_path: Path):
     analyzer = MovieAnalyzer(str(tmp_path / "movie.mp4"), load_models=False)
-    assert analyzer.visual_backend == "clef-flash"
     assert analyzer.clef_scan_interval == DEFAULT_CLEF_SCAN_INTERVAL
     assert analyzer._effective_visual_scan_interval() == DEFAULT_CLEF_SCAN_INTERVAL
 
 
-def test_analyzer_clip_backend_uses_visual_scan_interval(tmp_path: Path):
-    analyzer = MovieAnalyzer(
-        str(tmp_path / "movie.mp4"),
-        load_models=False,
-        visual_backend="clip",
-        visual_scan_interval=1.25,
-    )
-    assert analyzer._effective_visual_scan_interval() == 1.25
-
-
-def test_analyze_cli_defaults_clef_flash():
+def test_analyze_cli_clef_scan_interval_default():
     import analyzer.analyze as analyze_mod
 
     source = inspect.getsource(analyze_mod.main)
-    assert 'default="clef-flash"' in source
     assert "DEFAULT_CLEF_SCAN_INTERVAL" in source
+    assert "--visual-backend" not in source
 
 
 def test_apply_visual_topics_injected_scanner_unchanged(tmp_path: Path):
@@ -300,53 +241,29 @@ def test_apply_visual_topics_injected_scanner_unchanged(tmp_path: Path):
     assert result[0]["topics"] == ["religion_christianity"]
 
 
-def test_clef_load_failure_falls_back_to_clip(tmp_path: Path, monkeypatch, caplog):
+def test_clef_load_failure_skips_visual_topics(tmp_path: Path, monkeypatch, caplog):
     frame = tmp_path / "frame.jpg"
     Image.new("RGB", (8, 8), color="white").save(frame)
 
-    clip = MagicMock()
-    clip.topics_for_path.return_value = ["nudity"]
-
     analyzer = MovieAnalyzer(
         str(tmp_path / "movie.mp4"),
         load_models=False,
-        visual_backend="clef-flash",
         classify_topics=False,
+        filter_topics=("lgbtq",),
     )
     analyzer._scanned_frames = [{"time": 2.0, "frame_path": str(frame)}]
 
-    def fail_hybrid(**kwargs):
+    def fail_build(**kwargs):
         raise OSError("clef weights missing")
 
     monkeypatch.setattr(
-        "analyzer.clef_topics.build_hybrid_visual_scanner",
-        fail_hybrid,
+        "analyzer.clef_topics.build_clef_visual_scanner",
+        fail_build,
     )
-    monkeypatch.setattr(analyzer, "_build_clip_visual_scanner", lambda taxonomy: clip)
 
-    with caplog.at_level("ERROR"):
+    with caplog.at_level("WARNING"):
         result = analyzer._apply_visual_topics(
             [{"id": "seg_001", "start_time": 0.0, "end_time": 5.0, "topics": []}]
         )
-    assert "falling back to CLIP" in caplog.text
-    assert result[0]["topics"] == ["nudity"]
-    assert analyzer._visual_topic_scanner is clip
-
-
-def test_visual_backend_clip_selects_clip_scanner(tmp_path: Path, monkeypatch, caplog):
-    built = MagicMock()
-    taxonomy = {"Black people": "x", "nudity": "n"}
-
-    analyzer = MovieAnalyzer(
-        str(tmp_path / "movie.mp4"),
-        load_models=False,
-        visual_backend="clip",
-    )
-    monkeypatch.setattr(analyzer, "_visual_topic_taxonomy", lambda: taxonomy)
-    monkeypatch.setattr(analyzer, "_build_clip_visual_scanner", lambda tax: built)
-    with caplog.at_level("INFO"):
-        scanner = analyzer._create_visual_topic_scanner()
-    assert scanner is built
-    assert "clef-flash [none]" in caplog.text
-    assert "CLIP fallback [Black people, nudity]" in caplog.text
-    assert "skipped [none]" in caplog.text
+    assert "Visual topic scanner unavailable" in caplog.text
+    assert result[0]["topics"] == []

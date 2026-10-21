@@ -10,8 +10,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
-
 logger = logging.getLogger(__name__)
 
 
@@ -108,28 +106,16 @@ def resolve_clef_snapshot_dir(model_path: str | None) -> str:
     return snapshot_download(raw)
 
 
-def partition_visual_labels(taxonomy: dict[str, str]) -> tuple[set[str], set[str]]:
-    """Split taxonomy keys into clef-flash vs CLIP fallback buckets."""
-    keys = set(taxonomy.keys())
-    clef = {key for key in keys if clef_question_id_for_label(key) is not None}
-    clip = keys - clef
-    return clef, clip
+# Default clef-scored label when no Jellyfin/filter list is supplied (matches prior VISUAL_PROMPTS default).
+_DEFAULT_CLEF_VISUAL_BASE: dict[str, str] = {"lgbtq": "visual lgbtq"}
 
 
-def log_visual_label_routing(
-    *,
-    backend: str,
-    clef_labels: set[str],
-    clip_labels: set[str],
-    skipped_labels: set[str],
-) -> None:
-    logger.info(
-        "Visual topics (%s): clef-flash [%s]; CLIP fallback [%s]; skipped [%s]",
-        backend,
-        ", ".join(sorted(clef_labels)) or "none",
-        ", ".join(sorted(clip_labels)) or "none",
-        ", ".join(sorted(skipped_labels)) or "none",
-    )
+def clef_active_labels(filter_topics: tuple[str, ...] | list[str] = ()) -> frozenset[str]:
+    """Taxonomy keys clef-flash should score for this run."""
+    from analyzer.topic_classifier import taxonomy_with_extras
+
+    taxonomy = taxonomy_with_extras(filter_topics, dict(_DEFAULT_CLEF_VISUAL_BASE))
+    return frozenset(key for key in taxonomy if clef_question_id_for_label(key) is not None)
 
 
 class ClefFlashTopicScanner:
@@ -178,7 +164,6 @@ class ClefFlashTopicScanner:
         self._torch = torch
 
     def scores_for_image(self, image: Image.Image) -> dict[str, float]:
-        self._ensure_model()
         image = image.convert("RGB")
         question_ids = [
             qid
@@ -188,6 +173,7 @@ class ClefFlashTopicScanner:
         if not question_ids:
             self.last_scores = {}
             return {}
+        self._ensure_model()
         questions = {qid: R3_Q[qid] for qid in question_ids}
         rec = {"state": FULL_STATE, "images": [image], "questions": questions}
         enc = self._encode_record(self._processor.tokenizer, rec, processor=self._processor)
@@ -223,82 +209,22 @@ class ClefFlashTopicScanner:
             return self.topics_for_image(image)
 
 
-class HybridVisualTopicScanner:
-    """Clef for appearance/LGBTQ cues; CLIP for remaining visual taxonomy labels."""
-
-    def __init__(
-        self,
-        *,
-        clef: ClefFlashTopicScanner | None,
-        clip: Any | None,
-        clef_labels: set[str],
-        clip_labels: set[str],
-        skipped_labels: set[str],
-        backend: str = "clef-flash",
-    ):
-        self._clef = clef
-        self._clip = clip
-        self.clef_labels = set(clef_labels)
-        self.clip_labels = set(clip_labels)
-        self.skipped_labels = set(skipped_labels)
-        self.backend = backend
-        log_visual_label_routing(
-            backend=backend,
-            clef_labels=self.clef_labels,
-            clip_labels=self.clip_labels if clip is not None else set(),
-            skipped_labels=self.skipped_labels | (
-                self.clip_labels if clip is None and self.clip_labels else set()
-            ),
-        )
-
-    def topics_for_image(self, image: Image.Image) -> list[str]:
-        hits: set[str] = set()
-        if self._clef is not None:
-            hits.update(self._clef.topics_for_image(image))
-        if self._clip is not None:
-            clip_hits = self._clip.topics_for_image(image)
-            hits.update(topic for topic in clip_hits if topic in self.clip_labels)
-        return sorted(hits)
-
-    def topics_for_path(self, path: str | Path) -> list[str]:
-        with Image.open(path) as image:
-            return self.topics_for_image(image)
-
-
-def build_hybrid_visual_scanner(
+def build_clef_visual_scanner(
     *,
-    taxonomy: dict[str, str],
+    filter_topics: tuple[str, ...] | list[str],
     device: str,
     clef_model_path: str | None,
     clef_threshold: float,
-    clip_threshold: float,
-    clip_gated_inset_black: bool,
-    clip_factory: Any,
-) -> HybridVisualTopicScanner:
-    """Create a hybrid scanner; clip_factory(taxonomy_subset) -> ClipTopicScanner."""
-    clef_labels, clip_labels = partition_visual_labels(taxonomy)
-    skipped: set[str] = set()
-    clef_scanner: ClefFlashTopicScanner | None = None
-    if clef_labels:
-        clef_scanner = ClefFlashTopicScanner(
-            model_path=clef_model_path,
-            threshold=clef_threshold,
-            device=device,
-            active_labels=clef_labels,
-        )
-    clip_scanner = None
-    if clip_labels:
-        try:
-            clip_taxonomy = {key: taxonomy[key] for key in clip_labels}
-            clip_scanner = clip_factory(clip_taxonomy)
-        except Exception as exc:
-            logger.warning("CLIP fallback scanner unavailable: %s", exc)
-            skipped = set(clip_labels)
-    return HybridVisualTopicScanner(
-        clef=clef_scanner,
-        clip=clip_scanner,
-        clef_labels=clef_labels,
-        clip_labels=clip_labels if clip_scanner is not None else set(),
-        skipped_labels=skipped,
-        backend="clef-flash",
+) -> ClefFlashTopicScanner:
+    active = clef_active_labels(filter_topics)
+    logger.info(
+        "Visual topics (clef-flash): [%s]",
+        ", ".join(sorted(active)) or "none",
     )
+    return ClefFlashTopicScanner(
+        model_path=clef_model_path,
+        threshold=clef_threshold,
+        device=device,
+        active_labels=active,
+    )
+
