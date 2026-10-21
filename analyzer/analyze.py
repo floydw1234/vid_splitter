@@ -79,11 +79,7 @@ from analyzer.wan_replace import (
     prompt_for_tags,
 )
 from analyzer.clef_topics import DEFAULT_CLEF_SCAN_INTERVAL, DEFAULT_CLEF_THRESHOLD
-from analyzer.visual_topics import (
-    DEFAULT_VISUAL_SCAN_INTERVAL,
-    DEFAULT_VISUAL_THRESHOLD,
-    attach_visual_topics,
-)
+from analyzer.visual_topics import attach_visual_topics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -180,13 +176,9 @@ class MovieAnalyzer:
         topic_classifier=None,
         visual_topics: bool = True,
         visual_topic_scanner=None,
-        visual_backend: str = "clef-flash",
         clef_model_path: str | None = None,
         clef_threshold: float = DEFAULT_CLEF_THRESHOLD,
         clef_scan_interval: float = DEFAULT_CLEF_SCAN_INTERVAL,
-        visual_topic_threshold: float = DEFAULT_VISUAL_THRESHOLD,
-        visual_scan_interval: float = DEFAULT_VISUAL_SCAN_INTERVAL,
-        clip_gated_inset_black: bool = True,
         filter_topics: tuple[str, ...] = (),
     ):
         self.video_path = Path(video_path).resolve()
@@ -228,18 +220,9 @@ class MovieAnalyzer:
         self._topic_classifier = topic_classifier
         self.visual_topics_enabled = bool(visual_topics)
         self._visual_topic_scanner = visual_topic_scanner
-        backend = str(visual_backend or "clef-flash").strip().lower()
-        if backend not in {"clef-flash", "clip"}:
-            raise ValueError(
-                f"visual_backend must be 'clef-flash' or 'clip', got {visual_backend!r}"
-            )
-        self.visual_backend = backend
         self.clef_model_path = clef_model_path
         self.clef_threshold = float(clef_threshold)
         self.clef_scan_interval = float(clef_scan_interval)
-        self.visual_topic_threshold = float(visual_topic_threshold)
-        self.visual_scan_interval = float(visual_scan_interval)
-        self.clip_gated_inset_black = bool(clip_gated_inset_black)
         self.filter_topics = tuple(part.strip() for part in filter_topics if str(part).strip())
         self._scanned_frames: list[dict] = []
         self._visual_topic_frames: list[dict] = []
@@ -1220,7 +1203,7 @@ class MovieAnalyzer:
     def _classify_topics(self, segments: list[dict]) -> list[dict]:
         """Classify segments for transcript topics.
 
-        Adds a 'topics' key to each segment. Appearance topics still come from CLIP.
+        Adds a 'topics' key to each segment. Appearance/LGBTQ visual topics come from clef-flash.
         """
         for seg in segments:
             seg.setdefault("topics", [])
@@ -1478,9 +1461,7 @@ class MovieAnalyzer:
         return updated
 
     def _effective_visual_scan_interval(self) -> float:
-        if self.visual_backend == "clef-flash":
-            return max(0.5, float(self.clef_scan_interval))
-        return max(0.5, float(self.visual_scan_interval))
+        return max(0.5, float(self.clef_scan_interval))
 
     def _ensure_visual_topic_frames(self, duration: float) -> list[dict]:
         """Sample frames for visual avoid-topic scanning (denser than the NSFW broad pass)."""
@@ -1547,64 +1528,19 @@ class MovieAnalyzer:
         self._visual_topic_frames = collected
         return collected
 
-    def _visual_topic_taxonomy(self) -> dict:
-        from analyzer.topic_classifier import taxonomy_with_extras
-        from analyzer.visual_topics import VISUAL_PROMPTS
-
-        return taxonomy_with_extras(self.filter_topics, dict(VISUAL_PROMPTS))
-
-    def _build_clip_visual_scanner(self, taxonomy: dict):
-        from analyzer.visual_topics import ClipTopicScanner
-
-        return ClipTopicScanner(
-            device=getattr(self, "_device", "cpu"),
-            threshold=self.visual_topic_threshold,
-            taxonomy=taxonomy,
-            gated_inset_black=self.clip_gated_inset_black,
-        )
-
     def _create_visual_topic_scanner(self):
-        taxonomy = self._visual_topic_taxonomy()
+        from analyzer.clef_topics import build_clef_visual_scanner
+
         device = getattr(self, "_device", "cpu")
-        if self.visual_backend == "clip":
-            scanner = self._build_clip_visual_scanner(taxonomy)
-            from analyzer.clef_topics import log_visual_label_routing
-
-            log_visual_label_routing(
-                backend="clip",
-                clef_labels=set(),
-                clip_labels=set(taxonomy.keys()),
-                skipped_labels=set(),
-            )
-            logger.info(
-                "Visual topics: CLIP + Faster R-CNN person crops (see output/vision_bakeoff/)"
-            )
-            return scanner
-        try:
-            from analyzer.clef_topics import build_hybrid_visual_scanner
-
-            scanner = build_hybrid_visual_scanner(
-                taxonomy=taxonomy,
-                device=device,
-                clef_model_path=self.clef_model_path,
-                clef_threshold=self.clef_threshold,
-                clip_threshold=self.visual_topic_threshold,
-                clip_gated_inset_black=self.clip_gated_inset_black,
-                clip_factory=self._build_clip_visual_scanner,
-            )
-            if scanner._clef is not None:
-                scanner._clef._ensure_model()
-            return scanner
-        except Exception as exc:
-            logger.error(
-                "Clef-flash visual backend failed to load (%s); falling back to CLIP",
-                exc,
-            )
-            scanner = self._build_clip_visual_scanner(taxonomy)
-            logger.info(
-                "Visual topics: CLIP + Faster R-CNN person crops (see output/vision_bakeoff/)"
-            )
-            return scanner
+        scanner = build_clef_visual_scanner(
+            filter_topics=self.filter_topics,
+            device=device,
+            clef_model_path=self.clef_model_path,
+            clef_threshold=self.clef_threshold,
+        )
+        if scanner.active_labels:
+            scanner._ensure_model()
+        return scanner
 
     def _apply_visual_topics(self, segments: list[dict]) -> list[dict]:
         if not self.visual_topics_enabled:
@@ -2333,12 +2269,6 @@ def main():
         help="Skip visual avoid-topic scan (transcript topics still run unless --no-topics)",
     )
     parser.add_argument(
-        "--visual-backend",
-        choices=("clef-flash", "clip"),
-        default="clef-flash",
-        help="Visual avoid-topic detector (default: clef-flash full-frame; clip = CLIP + person crops)",
-    )
-    parser.add_argument(
         "--clef-model",
         dest="clef_model",
         default=None,
@@ -2354,18 +2284,7 @@ def main():
         "--clef-scan-interval",
         type=float,
         default=DEFAULT_CLEF_SCAN_INTERVAL,
-        help="Seconds between clef-flash visual frames when --visual-backend clef-flash (default: 2.0)",
-    )
-    parser.add_argument(
-        "--visual-scan-interval",
-        type=float,
-        default=DEFAULT_VISUAL_SCAN_INTERVAL,
-        help="Seconds between CLIP visual frames when --visual-backend clip (default: 1.0; NSFW broad pass stays at --scan-interval)",
-    )
-    parser.add_argument(
-        "--no-gated-inset-black",
-        action="store_true",
-        help="Disable gated inset pass that adds black people from small person crops (primary pass unchanged)",
+        help="Seconds between clef-flash visual frames (default: 2.0)",
     )
     parser.add_argument(
         "--wan-max-run",
@@ -2406,7 +2325,7 @@ def main():
         default=None,
         help=(
             "Transcript topic classifier: embed (MiniLM on :9009, default) or "
-            "llm (OpenAI-compatible chat at TOPIC_API_URL). Visual CLIP topics still run either way."
+            "llm (OpenAI-compatible chat at TOPIC_API_URL). clef-flash visual topics still run either way."
         ),
     )
     parser.add_argument(
@@ -2462,12 +2381,9 @@ def main():
         classify_topics=not args.no_topics,
         topic_backend=args.topic_backend,
         visual_topics=not args.no_visual_topics,
-        visual_backend=args.visual_backend,
         clef_model_path=args.clef_model,
         clef_threshold=args.clef_threshold,
         clef_scan_interval=args.clef_scan_interval,
-        visual_scan_interval=args.visual_scan_interval,
-        clip_gated_inset_black=not args.no_gated_inset_black,
         filter_topics=filter_topics,
     )
 
